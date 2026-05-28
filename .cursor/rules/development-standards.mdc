@@ -1,0 +1,57 @@
+---
+description: Development standards — language, runtime, and platform context from scaffold
+globs: ["**/*"]
+alwaysApply: true
+---
+
+# Development Standards
+
+This project was scaffolded with **TypeScript**, **AWS**, and **Jest** as the test framework. Assume these as the default context when suggesting code, tests, or architecture.
+
+## ⚠️ MANDATORY: External Standards Preflight
+
+**Before performing any task, you MUST:**
+
+1. Read [salte-common/standards](https://github.com/salte-common/standards) recursively and confirm compliance.
+2. **Do not proceed until done.** This is a blocking prerequisite.
+3. In your response, cite the specific standards section(s) you applied (e.g. "Per Architecture Standards: ...", "Per Development Standards §X: ...") to prove you reviewed them.
+
+**Required checklist — hard stop if not completed:**
+- [ ] I have reviewed salte-common/standards and confirmed compliance
+- [ ] I have cited the relevant standards section(s) in my response
+
+If you cannot access or read the standards, stop and inform the user. Do not proceed without this confirmation.
+
+## Assumed Context (from `terraflow new`)
+
+| Setting | Value |
+|---------|-------|
+| Language | TypeScript |
+| Runtime | Node.js |
+| Target Platform | AWS |
+| Test Framework | Jest |
+
+## Project Specification
+
+**Before making significant changes, check for `SPECIFICATION.md` in the project root.** If it exists, read it and apply its requirements. Project-specific specifications override generic standards when they conflict.
+
+## External Standards (salte-common/standards)
+
+Apply as appropriate for the task:
+
+- **Architecture Standards** — Twelve-Factor App, modular design, testing pyramid
+- **Development Standards** — Code formatting, quality, security
+- **JavaScript Standards** — Language-specific guidelines
+- **AWS Architecture Standards** — Platform-specific deployment and architecture
+- **Deployment Standards** — IaC, CI/CD, environment config
+- **Security Standards** — OWASP Top 10, data protection, API security
+- **Documentation Standards** — README, API docs, code comments
+- **Git Workflow Standards** — Branch strategy, tagging, release process
+
+## When Suggesting Code
+
+1. Use **TypeScript** conventions (runtime: **Node.js**)
+2. Write tests with **Jest**
+3. Target **AWS** for deployment and infrastructure
+4. Cite the specific salte-common/standards section(s) you applied in your response
+5. Honor `SPECIFICATION.md` if present

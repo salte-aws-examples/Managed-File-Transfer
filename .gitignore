@@ -1,0 +1,42 @@
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfvars
+.terraform.lock.hcl
+
+# Terraflow
+.terraflow/
+
+# Environment
+.env
+
+# Language-specific (adjust based on --language)
+# Node.js:
+node_modules/
+npm-debug.log*
+dist/
+.build/
+.coverage/
+
+# Python:
+__pycache__/
+*.py[cod]
+venv/
+.pytest_cache/
+*.egg-info/
+
+# Go:
+*.exe
+*.dll
+*.so
+*.dylib
+vendor/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+

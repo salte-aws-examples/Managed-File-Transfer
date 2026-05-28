@@ -1,0 +1,17 @@
+provider: aws
+
+backend:
+  type: s3
+  config:
+     bucket: ${AWS_REGION}-${AWS_ACCOUNT_ID}-terraform-state
+     key: ${GIT_REPOSITORY}
+     region: ${AWS_REGION}
+     dynamodb_table: terraform-statelock
+     encrypt: true
+     kms_key_id: arn:aws:kms:${AWS_REGION}:${AWS_ACCOUNT_ID}:alias/${AWS_REGION}-${AWS_ACCOUNT_ID}-terraform-state
+
+variables:
+  git_repository: ${GITHUB_REPOSITORY}
+  commit_hash: "${GIT_COMMIT_SHA}"
+  allowed_cidr_blocks: "${ALLOWED_CIDR_BLOCKS}"
+  public_hosted_zone_name: "${PUBLIC_HOSTED_ZONE_NAME}"

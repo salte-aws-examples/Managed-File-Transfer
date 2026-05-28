@@ -1,0 +1,39 @@
+{
+  "name": "Managed-File-Transfer",
+  "version": "1.0.0",
+  "description": "Serverless function for Managed-File-Transfer",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "build:lambda": "node -e \"require('fs').mkdirSync('.build/lambda/auth',{recursive:true})\" && esbuild src/main/auth/index.ts --bundle --platform=node --target=node20 --format=cjs --outfile=.build/lambda/auth/index.js",
+    "tf:plan": "npm run build:lambda && tf plan",
+    "tf:apply": "npm run build:lambda && tf apply",
+    "test": "jest",
+    "test:coverage": "jest --coverage",
+    "lint": "eslint src --ext .ts",
+    "lint:fix": "eslint src --ext .ts --fix",
+    "format": "prettier --write \"src/**/*.ts\""
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@aws-sdk/client-secrets-manager": "^3.0.0"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.0.0",
+    "@types/node": "^20.0.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "eslint": "^8.0.0",
+    "eslint-config-prettier": "^9.0.0",
+    "eslint-plugin-prettier": "^5.0.0",
+    "jest": "^29.0.0",
+    "prettier": "^3.0.0",
+    "esbuild": "^0.25.0",
+    "ts-jest": "^29.0.0",
+    "typescript": "^5.0.0"
+  }
+}
+

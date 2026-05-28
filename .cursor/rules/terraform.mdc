@@ -1,0 +1,71 @@
+---
+description: How to use Terraflow in this project
+globs: ["**/*.tf", "**/.tfwconfig.yml", "**/terraform/**", "**/.env.example"]
+alwaysApply: false
+---
+
+# Terraflow — Using This Project
+
+This project uses [Terraflow](https://github.com/salte-common/terraflow), an opinionated Terraform CLI wrapper. Use `terraflow` instead of raw `terraform` for plan/apply/destroy — it handles init and workspace selection automatically.
+
+## First-Time Setup
+
+1. `cp .env.example .env` and add your cloud credentials
+2. Edit `.tfwconfig.yml` with your backend bucket/storage and secrets
+3. `terraflow init` — initialize Terraform
+4. `terraflow plan` — verify configuration
+
+## Day-to-Day Commands
+
+```bash
+terraflow plan              # Plan changes (auto init + workspace)
+terraflow apply             # Apply changes
+terraflow destroy           # Destroy infrastructure
+terraflow fmt               # Format Terraform files (no init)
+terraflow config show       # Show resolved config with sources
+terraflow --dry-run plan    # Preview without executing
+```
+
+Prefer `terraflow` over `terraform` for plan/apply/destroy — it runs init and workspace selection when needed.
+
+## Workspace Derivation
+
+Terraflow derives workspaces in this order (first match wins):
+
+1. **CLI** — `--workspace` or `-w`
+2. **Environment** — `TERRAFLOW_WORKSPACE`
+3. **Git tag** — e.g. `v1.0.0` → `v1-0-0`
+4. **Git branch** — if non-ephemeral (e.g. `main`, `my-preview-branch`). Ephemeral branches (`feature/foo`, `fix/bar`) fall through to hostname.
+5. **Hostname** — when none of the above apply (no git repo, no tag, or ephemeral branch)
+
+Override explicitly:
+
+```bash
+terraflow --workspace production plan
+```
+
+## Configuration
+
+- **File:** `.tfwconfig.yml` — backend, secrets, auth, workspace strategy
+- **Hierarchy:** defaults → `.tfwconfig.yml` → `TERRAFLOW_*` env vars → CLI args
+- **Template variables:** `${AWS_REGION}`, `${GITHUB_REPOSITORY}`, `${WORKSPACE}`, etc.
+
+Point users to `.tfwconfig.yml` for backend, secrets, and auth configuration.
+
+## Optional Cleanup
+
+If the project doesn't need certain generated artifacts, you may delete them:
+
+| Delete if... | Files/Directories |
+|--------------|-------------------|
+| No application code (pure Terraform) | `src/` directory |
+| No serverless/lambda functions | Application-specific resources in `terraform/main.tf` |
+| Different structure preferred | `terraform/modules/` (move or inline as needed) |
+
+**Always keep:** `.tfwconfig.yml`, `terraform/_init.tf`, `terraform/inputs.tf` (or equivalent variables).
+
+## When Suggesting Terraflow Usage
+
+- Prefer `terraflow` over raw `terraform` for plan/apply/destroy
+- If generated `src/` or application code is irrelevant, suggest deleting it
+- Point users to `.tfwconfig.yml` for configuration changes

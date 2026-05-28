@@ -1,0 +1,58 @@
+---
+description: How to maintain .ai-metadata.json - MANDATORY AI code tracking
+globs: [".ai-metadata.json", "**/*"]
+alwaysApply: true
+---
+
+# AI Code Tracking — .ai-metadata.json Maintenance
+
+**When you create or modify any file that is checked into source control, you MUST update `.ai-metadata.json` immediately.**
+
+## Scope: Source-Controlled Files Only
+
+**Only track files that are committed to git.** Do NOT add entries for:
+
+- `node_modules/`, `dist/`, `build/`
+- `.env`, `.env.local`, `.env.*.local`
+- `__pycache__/`, `venv/`, `.pytest_cache/`, `*.pyc`
+- `vendor/`, `*.exe`, `*.dylib`
+- `.terraform/`, `*.tfstate`, `*.tfstate.*`
+- `.cursor/` (if excluded from git)
+- Any path listed in `.gitignore`
+
+## Metadata File Structure
+
+```json
+{
+  "files": {
+    "path/to/file.ts": {
+      "lines_total": 100,
+      "lines_ai_generated": 75,
+      "ai_percentage": 75.0,
+      "last_updated": "2024-12-04T15:30:00Z",
+      "tool": "cursor"
+    }
+  },
+  "metadata_version": "1.0"
+}
+```
+
+- `lines_total`: Total lines in the file (read the file to get this)
+- `lines_ai_generated`: Only lines created by AI (cumulative for modified files)
+- `ai_percentage`: `(lines_ai_generated / lines_total) × 100`
+- `last_updated`: ISO 8601 UTC timestamp
+- `tool`: `"cursor"`
+
+## Required Workflow
+
+1. **After creating a new file**: Add entry with `lines_total` = file line count, `lines_ai_generated` = same, `ai_percentage` = 100
+2. **After modifying an existing file**: Read `.ai-metadata.json` for current `lines_ai_generated`, add new AI lines, update `lines_total` from file, recalculate `ai_percentage`
+3. **Preserve existing data**: Merge your changes; do not overwrite other file entries
+4. **Create if missing**: Initialize with `{"files": {}, "metadata_version": "1.0"}`
+
+## DO NOT
+
+- Wait until the end of a task to update metadata
+- Include human-created lines in `lines_ai_generated`
+- Guess `lines_total` — always read the file
+- Track files that are gitignored
