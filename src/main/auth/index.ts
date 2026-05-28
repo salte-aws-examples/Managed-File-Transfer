@@ -63,7 +63,7 @@ export const handler = async (
     // 2. Validate partner credentials against Entra ID token endpoint.
     // The .default suffix is required by Entra ID for client credentials
     // flow against custom APIs — named scopes are not supported in this flow.
-    const scope = `api://${entra_client_id}/mft.connect`;
+    const scope = `api://${entra_client_id}/.default`;
     const tokenUrl = `https://login.microsoftonline.com/${entra_tenant_id}/oauth2/v2.0/token`;
 
     const body = new URLSearchParams({

@@ -112,7 +112,7 @@ resource "aws_iam_role_policy" "replication" {
     Statement = [
       {
         Effect   = "Allow"
-        Action   = ["s3:GetReplicationConfiguration", "s3:ListBucket"]
+        Action   = ["s3:GetReplicationConfiguration", "s3:ListBucket", "s3:GetEncryptionConfiguration"]
         Resource = "arn:aws:s3:::${local.source_bucket_name}"
       },
       {
@@ -131,12 +131,12 @@ resource "aws_iam_role_policy" "replication" {
       },
       {
         Effect   = "Allow"
-        Action   = ["kms:Decrypt", "kms:GenerateDataKey"]
+        Action   = ["kms:Decrypt", "kms:DescribeKey"]
         Resource = local.default_key_active_arn
       },
       {
         Effect   = "Allow"
-        Action   = ["kms:GenerateDataKey", "kms:Decrypt"]
+        Action   = ["kms:Encrypt", "kms:GenerateDataKey", "kms:DescribeKey"]
         Resource = local.default_key_passive_arn
       },
     ]

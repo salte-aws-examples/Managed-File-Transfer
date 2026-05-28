@@ -236,7 +236,7 @@ The following resources are provisioned in the primary region:
 - **Secrets Manager Secret (Entra Config)** — Referenced as a data source. Holds a JSON object with `entra_tenant_id`, `entra_client_id`, and `entra_client_secret`. Provisioned outside this Terraform stack by a separate secrets management process. The Lambda reads it at runtime; this stack only grants `secretsmanager:GetSecretValue` on its ARN.
 - **CloudWatch Log Group (Lambda)** — Retention 90 days.
 - **VPC Endpoint (S3 Gateway)** — S3 gateway endpoint in the VPC, associated with route tables in the private subnets.
-- **KMS Key (Default)** — Multi-region CMK used as the bucket default encryption key. Primary alias: `alias/<prefix>-mft-default`. Replica key with same alias in DR region. Primary mode only.
+- **KMS Key (Default)** — Multi-region CMK used as the bucket default encryption key. Primary alias: `alias/<prefix>-sftp-default`. Replica key with same alias in DR region. Primary mode only.
 - **KMS Key (Sample Carrier)** — Multi-region CMK for the sample carrier. Primary alias: `alias/<prefix>-mft-sample-carrier`. Replica in DR region. Primary mode only.
 - **S3 Bucket (Primary)** — SFTP backing store with versioning, SSE-KMS using the default KMS key, blocked public access, and server access logging.
 - **S3 Bucket (DR)** — Replica bucket in DR region with versioning, SSE-KMS, and blocked public access.
@@ -1106,7 +1106,7 @@ Note: there is no sample carrier KMS key. The shared S3 bucket uses the default 
 # this same pattern.
 #
 # Role naming convention: mft-<carrier>.<partner>.<transfer-type>.<env>
-# - mft- prefix
+# - sftp- prefix
 # - . as segment delimiter between carrier, partner, transfer type, environment
 # - - within segment names for multi-word values
 # - np for non-production, p for production
@@ -1228,7 +1228,7 @@ resource "aws_iam_role_policy" "replication" {
     Statement = [
       {
         Effect   = "Allow"
-        Action   = ["s3:GetReplicationConfiguration", "s3:ListBucket"]
+        Action   = ["s3:GetReplicationConfiguration", "s3:ListBucket", "s3:GetEncryptionConfiguration"]
         Resource = "arn:aws:s3:::${local.source_bucket_name}"
       },
       {
@@ -1244,12 +1244,12 @@ resource "aws_iam_role_policy" "replication" {
       },
       {
         Effect   = "Allow"
-        Action   = ["kms:Decrypt", "kms:GenerateDataKey"]
+        Action   = ["kms:Decrypt", "kms:DescribeKey"]
         Resource = local.default_key_active_arn
       },
       {
         Effect   = "Allow"
-        Action   = ["kms:GenerateDataKey", "kms:Decrypt"]
+        Action   = ["kms:Encrypt", "kms:GenerateDataKey", "kms:DescribeKey"]
         Resource = local.default_key_passive_arn
       }
     ]
