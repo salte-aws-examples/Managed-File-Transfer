@@ -121,6 +121,24 @@ variable "public_hosted_zone_name" {
   type        = string
   default     = "ezipam.com"
 }
+
+variable "sample_ftps_entra_client_id" {
+  description = "Entra ID app registration client ID for the sample FTPS transfer (sample-carrier.sample-partner.sample-transfer-1.np). Used to seed the DynamoDB users table for testing."
+  type        = string
+  default     = ""
+}
+
+variable "sample_sftp_entra_client_id" {
+  description = "Entra ID app registration client ID for the sample SFTP + Entra transfer (sample-carrier.sample-partner.sample-transfer-3.np). Used to seed the DynamoDB users table for testing."
+  type        = string
+  default     = ""
+}
+
+variable "sample_sftp_ssh_public_key" {
+  description = "SSH public key for the sample SFTP + SSH key transfer (sample-carrier.sample-partner.sample-transfer-2.np). Used to seed the DynamoDB users table for testing. Optional — leave empty to create the record without a key."
+  type        = string
+  default     = ""
+}
 ```
 
 ---
@@ -229,7 +247,9 @@ The following resources are provisioned in the primary region:
 - **Security Group** — Controls inbound access to the Transfer Family VPC endpoint on ports 22 (SFTP), 21/1024-65535 (FTPS passive), and 443 (AS2). Restricted to `var.allowed_cidr_blocks`.
 - **EIPs** — `var.eip_count` Elastic IPs assigned to the Transfer Family server endpoint. Defaults to 2 for Multi-AZ HA.
 - **AWS Transfer Family Server** — Multi-AZ managed server provisioned in **public subnets** with VPC endpoint type, protocols SFTP + FTPS + AS2, `identity_provider_type = "AWS_LAMBDA"`, custom hostname, and ACM certificate attached. Public subnets are required so EIPs are reachable from the internet.
-- **Lambda Auth Broker** — Node.js Lambda function provisioned in **private subnets** with VPC config, invoked directly by Transfer Family for every SFTP and FTPS authentication attempt. Validates partner credentials against Entra ID using the OAuth2 client credentials flow with `.default` scope. Reads the `roles` claim from the returned token to derive the IAM session role and home directory. Returns authorization response to Transfer Family.
+- **Lambda Auth Broker** — Node.js Lambda function provisioned in **private subnets** with VPC config, invoked directly by Transfer Family for every SFTP and FTPS authentication attempt. Looks up the username in the DynamoDB users table to retrieve routing config (carrier, partner, transfer type, env, protocol, session role). For FTPS validates partner credentials against Entra ID using the OAuth2 client credentials flow with `.default` scope. For SFTP compares the public key from the event against the stored public key. Returns session role ARN and home directory to Transfer Family.
+- **DynamoDB Global Tables** — Four global tables (`carriers`, `partners`, `transfer-types`, `users`) with replicas in both primary and DR regions. The Lambda reads from its local region's replica. The users table is the authoritative source for all partner routing configuration and credentials.
+- **DynamoDB Gateway VPC Endpoint** — Free gateway endpoint allowing the Lambda to reach DynamoDB without traversing the NAT gateway.
 - **Lambda Security Group** — Allows outbound HTTPS (443) only, for Entra ID token endpoint calls via NAT gateway.
 - **Secrets Manager VPC Endpoint** — Interface endpoint in private subnets with private DNS enabled. Allows Lambda to reach Secrets Manager without traversing the NAT gateway. Dedicated security group allowing inbound 443 from the Lambda security group only.
 - **Secrets Manager VPC Endpoint Security Group** — Inbound 443 from Lambda security group only.
@@ -661,46 +681,75 @@ The Lambda is the authentication integration point between Transfer Family and E
 
 ### Authentication Flow
 
-1. Partner's FTPS/SFTP client sends their Entra ID app registration client ID as username and client secret as password
-2. Transfer Family invokes the Lambda with a JSON event containing `username`, `password`, `serverId`, `protocol`, and `sourceIp`
-3. Lambda fetches the Entra config (`entra_tenant_id`, `entra_client_id`, `entra_client_secret`) from AWS Secrets Manager
-4. Lambda calls the Entra ID token endpoint using the partner's credentials with scope `api://<entra_client_id>/.default` — the `.default` suffix is required by Entra ID for client credentials flow against custom APIs
-5. Entra ID validates the credentials and returns a JWT if valid
-6. Lambda validates the JWT audience claim against `api://<entra_client_id>`
-7. Lambda reads the `roles` claim from the token — this contains the IAM role name assigned to this partner in Entra ID (e.g. `mft-sample-carrier.sample-partner.sample-transfer.np`)
-8. Lambda uses the role name directly as the IAM role name and parses it to derive the home directory
-9. Lambda returns the authorization response to Transfer Family
+**Universal rules — applied first regardless of protocol:**
+1. Username must exist in DynamoDB — deny if not found
+2. Record `status` must be `active` — deny if disabled
+3. No further processing if either check fails
+4. If neither `publicKey` nor `password` is present in the event — Transfer Family is performing a user existence check. Return a minimal valid session response to confirm the user exists and allow Transfer Family to proceed to credential challenge. This only occurs for SFTP connections.
+
+**Authentication routing logic:**
+
+| Protocol | Public key in DynamoDB | Auth mechanism | Authorization validation |
+|---|---|---|---|
+| `ftps` | n/a | Entra ID client credentials | Token `roles` claim parsed and compared against DynamoDB carrierId, partnerId, transferTypeId, env |
+| `sftp` | yes | SSH key cryptographic match | DynamoDB record presence and active status |
+| `sftp` | no | Entra ID client credentials | Token `roles` claim parsed and compared against DynamoDB carrierId, partnerId, transferTypeId, env |
+| `as2` | n/a | Certificate — Transfer Family native | Not Lambda-invoked |
+
+**Entra role claim validation** — for all Entra paths (FTPS and SFTP without SSH key), after the token is validated the Lambda reads the `roles` claim and parses it against the DynamoDB record:
+
+```javascript
+// Token roles claim format: mft-<carrierId>.<partnerId>.<transferTypeId>.<env>
+const roleName = jwtPayload.roles?.[0];
+if (!roleName) {
+  console.error(`No roles claim in token for ${username}`);
+  return {};
+}
+const roleWithoutPrefix = roleName.replace(/^mft-/, "");
+const [roleCarrier, rolePartner, roleTransfer, roleEnv] = roleWithoutPrefix.split(".");
+
+if (
+  roleCarrier  !== carrierId  ||
+  rolePartner  !== partnerId  ||
+  roleTransfer !== transferId ||
+  roleEnv      !== env
+) {
+  console.error(`Role claim mismatch for ${username}: token=${roleName}`);
+  return {};
+}
+```
+
+This means a valid Entra token is not sufficient on its own — the role claim must exactly match the DynamoDB record. Neither Entra nor DynamoDB alone can authorize access.
+
+**Session role and home directory derivation** — derived from the DynamoDB record fields:
+```javascript
+const roleArn = `arn:aws:iam::${accountId}:role/mft-${record.carrierId}.${record.partnerId}.${record.transferTypeId}.${record.env}`;
+const s3Folder = record.env === 'p' ? 'production' : 'non-production';
+const homeDirectory = `/${bucket}/${s3Folder}/${record.carrierId}/${record.partnerId}/${record.transferTypeId}`;
+```
 
 ### Role Name Convention and Derivation
 
-The IAM role name is carried in the `roles` claim of the Entra ID token. It is defined as an app role on the Lambda app registration and assigned to each partner app registration. The role name directly matches the IAM role name in AWS — no translation needed.
+IAM session roles follow the convention `mft-<carrierId>.<partnerId>.<transferTypeId>.<env>` where each segment is the lower kebab ID from the corresponding DynamoDB lookup table. The role name is derived at runtime from the DynamoDB user record — not parsed from the username or token.
 
-Role name format: `mft-<carrier>.<partner>.<transfer-type>.<env>`
+Role name format: `mft-<carrier-id>.<partner-id>.<transfer-type-id>.<env>`
 
-The `.` character is used as the segment delimiter between carrier, partner, transfer type, and environment. Hyphens `-` are reserved for use within segment names (e.g. `sample-carrier`, `general-ledger`). This makes parsing unambiguous regardless of how many hyphens appear within a segment name.
+Environment values:
 
-Environment suffix mapping:
-
-| Role name suffix | S3 folder |
+| DynamoDB `env` | S3 folder |
 |---|---|
 | `p` | `production` |
 | `np` | `non-production` |
 
-Derived values from role name `mft-acme.workday.personnel.p`:
+Derived values from DynamoDB record `{carrierId: "acme-mutual", partnerId: "workday", transferTypeId: "personnel", env: "p"}`:
 
 | Value | Result |
 |---|---|
-| IAM role name | `mft-acme.workday.personnel.p` |
-| IAM role ARN | `arn:aws:iam::<account-id>:role/mft-acme.workday.personnel.p` |
-| Home directory | `/<bucket>/production/acme/workday/personnel` |
+| IAM role name | `mft-acme-mutual.workday.personnel.p` |
+| IAM role ARN | `arn:aws:iam::<account-id>:role/mft-acme-mutual.workday.personnel.p` |
+| Home directory | `/<bucket>/production/acme-mutual/workday/personnel` |
 
-Parsing logic — given role name `mft-<carrier>.<partner>.<transfer-type>.<env>`:
-- Strip leading `mft-`
-- Split remainder on `.`
-- Last segment → environment (`p` or `np`)
-- Second to last → transfer type
-- Third to last → partner
-- Everything remaining → carrier (joined with `.` if multi-segment, though carriers should be single segment)
+The session role is provisioned by the partner onboarding Terraform. Its S3 permissions are scoped to both the production and non-production prefixes for that carrier/partner/transfer-type — environment isolation is enforced by the home directory mapping returned by the Lambda, not by IAM.
 
 The session role is provisioned by the partner onboarding Terraform. Its S3 permissions are scoped to both the production and non-production prefixes for that carrier/partner/transfer-type — environment isolation is enforced by the home directory mapping returned by the Lambda, not by IAM.
 
@@ -773,7 +822,7 @@ resource "aws_vpc_endpoint" "secretsmanager" {
 resource "aws_lambda_function" "auth" {
   provider         = aws.active
   function_name    = "${var.prefix}-mft-auth"
-  description      = "Transfer Family identity provider — validates partner credentials against Entra ID and derives session role and home directory from token roles claim"
+  description      = "Transfer Family identity provider — looks up partner in DynamoDB, validates credentials against Entra ID (FTPS) or SSH public key (SFTP), returns session role and home directory"
   runtime          = "nodejs20.x"
   handler          = "index.handler"
   role             = aws_iam_role.lambda_exec.arn
@@ -791,6 +840,7 @@ resource "aws_lambda_function" "auth" {
     variables = {
       ENTRA_CONFIG_SECRET = local.entra_config_secret
       S3_BUCKET_NAME      = local.source_bucket_name
+      USERS_TABLE         = "${var.prefix}-mft-users"
     }
   }
 
@@ -823,121 +873,163 @@ import {
   SecretsManagerClient,
   GetSecretValueCommand,
 } from "@aws-sdk/client-secrets-manager";
+import {
+  DynamoDBClient,
+  GetItemCommand,
+} from "@aws-sdk/client-dynamodb";
 
 const secrets = new SecretsManagerClient({});
-
-// Role name environment suffix → S3 folder mapping
-const ENV_FOLDER_MAP = {
-  p: "production",
-  np: "non-production",
-};
+const dynamo  = new DynamoDBClient({});
 
 export const handler = async (event, context) => {
-  const { username, password } = event;
+  const { username, password, publicKey } = event;
 
   try {
-    if (!username || !password) {
-      console.error("Missing username or password");
+    if (!username) {
+      console.error("Missing username");
       return {};
     }
 
-    // 1. Fetch the Entra config from Secrets Manager at runtime. We
-    // intentionally do not cache between invocations — rotations in Secrets
-    // Manager take effect immediately. The secret is a JSON object with keys
-    // entra_tenant_id, entra_client_id, entra_client_secret and is provisioned
-    // outside this Terraform stack.
-    const secretId = process.env.ENTRA_CONFIG_SECRET;
-    const secretResponse = await secrets.send(
-      new GetSecretValueCommand({ SecretId: secretId }),
-    );
-    const {
-      entra_tenant_id,
-      entra_client_id,
-      entra_client_secret,
-    } = JSON.parse(secretResponse.SecretString);
+    // 1. Look up username in DynamoDB users table.
+    // This is the authoritative source for routing config and protocol.
+    const tableResult = await dynamo.send(new GetItemCommand({
+      TableName: process.env.USERS_TABLE,
+      Key: { username: { S: username } },
+    }));
 
-    // 2. Validate partner credentials against Entra ID token endpoint.
-    // The .default suffix is required by Entra ID for client credentials
-    // flow against custom APIs — named scopes are not supported in this flow.
-    const scope = `api://${entra_client_id}/.default`;
-    const tokenUrl = `https://login.microsoftonline.com/${entra_tenant_id}/oauth2/v2.0/token`;
-
-    const body = new URLSearchParams({
-      grant_type: "client_credentials",
-      client_id: username,        // Partner's Entra ID app registration client ID
-      client_secret: password,    // Partner's Entra ID app registration client secret
-      scope,
-    });
-
-    const tokenResponse = await fetch(tokenUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: body.toString(),
-    });
-
-    if (!tokenResponse.ok) {
-      console.error(`Entra ID auth failed for ${username}: ${tokenResponse.status}`);
+    const item = tableResult.Item;
+    if (!item) {
+      console.error(`Unknown username: ${username}`);
+      return {};
+    }
+    if (item.status.S !== "active") {
+      console.error(`Disabled username: ${username}`);
       return {};
     }
 
-    const tokenData = await tokenResponse.json();
+    const protocol   = item.protocol.S;
+    const carrierId  = item.carrierId.S;
+    const partnerId  = item.partnerId.S;
+    const transferId = item.transferTypeId.S;
+    const env        = item.env.S;
+    const storedKey  = item.publicKey?.S;
 
-    // 3. Decode and validate JWT audience claim. Signature verification is
-    // provided by the TLS channel to the Entra ID token endpoint.
-    const [, payloadB64] = tokenData.access_token.split(".");
-    const payload = JSON.parse(Buffer.from(payloadB64, "base64url").toString());
+    // 3. Derive session role ARN and home directory from DynamoDB record.
+    const accountId     = context.invokedFunctionArn.split(":")[4];
+    const bucket        = process.env.S3_BUCKET_NAME;
+    const s3Folder      = env === "p" ? "production" : "non-production";
+    const roleArn       = `arn:aws:iam::${accountId}:role/mft-${carrierId}.${partnerId}.${transferId}.${env}`;
+    const homeDirectory = `/${bucket}/${s3Folder}/${carrierId}/${partnerId}/${transferId}`;
 
-    const expectedAudience = `api://${entra_client_id}`;
-    if (payload.aud !== expectedAudience) {
-      console.error(`Invalid token audience: ${payload.aud}`);
+    // 4. User existence check — Transfer Family invokes the Lambda with no
+    // credentials before the actual credential challenge for SFTP connections.
+    // Return a minimal valid session response to confirm the user exists.
+    if (!event.publicKey && !password) {
+      console.log(`User existence check for ${username} — returning session stub`);
+      return {
+        Role: roleArn,
+        HomeDirectoryType: "LOGICAL",
+        HomeDirectoryDetails: JSON.stringify([
+          { Entry: "/", Target: homeDirectory },
+        ]),
+      };
+    }
+
+    // 5. Branch on protocol and credential type:
+    //    ftps              → always Entra ID
+    //    sftp + publicKey  → SSH key auth
+    //    sftp + no key     → Entra ID
+    if (protocol === "ftps" || (protocol === "sftp" && !storedKey)) {
+      // Entra ID client credentials path
+      if (!password) {
+        console.error(`Missing password for ${username}`);
+        return {};
+      }
+
+      // 3. Fetch Entra config from Secrets Manager at runtime.
+      const secretResponse = await secrets.send(
+        new GetSecretValueCommand({ SecretId: process.env.ENTRA_CONFIG_SECRET }),
+      );
+      const { entra_tenant_id, entra_client_id } =
+        JSON.parse(secretResponse.SecretString);
+
+      const clientId = item.clientId?.S;
+      if (!clientId) {
+        console.error(`No Entra client ID stored for ${username}`);
+        return {};
+      }
+
+      const scope    = `api://${entra_client_id}/.default`;
+      const tokenUrl = `https://login.microsoftonline.com/${entra_tenant_id}/oauth2/v2.0/token`;
+
+      const body = new URLSearchParams({
+        grant_type:    "client_credentials",
+        client_id:     clientId,
+        client_secret: password,
+        scope,
+      });
+
+      const tokenResponse = await fetch(tokenUrl, {
+        method:  "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body:    body.toString(),
+      });
+
+      if (!tokenResponse.ok) {
+        console.error(`Entra ID auth failed for ${username}: ${tokenResponse.status}`);
+        return {};
+      }
+
+      const tokenData = await tokenResponse.json();
+      const [, payloadB64] = tokenData.access_token.split(".");
+      const jwtPayload = JSON.parse(Buffer.from(payloadB64, "base64url").toString());
+
+      if (jwtPayload.aud !== `api://${entra_client_id}`) {
+        console.error(`Invalid token audience: ${jwtPayload.aud}`);
+        return {};
+      }
+
+      // Validate roles claim matches DynamoDB record exactly.
+      // Format: mft-<carrierId>.<partnerId>.<transferTypeId>.<env>
+      // Neither Entra nor DynamoDB alone is sufficient — both must agree.
+      const roleName = jwtPayload.roles?.[0];
+      if (!roleName) {
+        console.error(`No roles claim in token for ${username}`);
+        return {};
+      }
+      const roleWithoutPrefix = roleName.replace(/^mft-/, "");
+      const [roleCarrier, rolePartner, roleTransfer, roleEnv] = roleWithoutPrefix.split(".");
+
+      if (
+        roleCarrier  !== carrierId  ||
+        rolePartner  !== partnerId  ||
+        roleTransfer !== transferId ||
+        roleEnv      !== env
+      ) {
+        console.error(`Role claim mismatch for ${username}: token=${roleName}`);
+        return {};
+      }
+
+      console.log(`${protocol.toUpperCase()} Entra authenticated: ${username}`);
+
+    } else if (protocol === "sftp" && storedKey) {
+      // SSH key auth path
+      if (!event.publicKey) {
+        console.error(`Expected SSH key auth for ${username} but no public key in event`);
+        return {};
+      }
+      if (event.publicKey.trim() !== storedKey.trim()) {
+        console.error(`Public key mismatch for ${username}`);
+        return {};
+      }
+      console.log(`SFTP SSH key authenticated: ${username}`);
+
+    } else {
+      console.error(`Unsupported protocol: ${protocol}`);
       return {};
     }
 
-    // 4. Read the IAM role name from the roles claim.
-    // The roles claim contains the app role value assigned to this partner
-    // in Entra ID, which exactly matches the IAM role name in AWS.
-    // Format: mft-<carrier>.<partner>.<transfer-type>.<env>
-    if (!payload.roles || payload.roles.length === 0) {
-      console.error(`No roles claim in token for ${username}`);
-      return {};
-    }
-
-    const roleName = payload.roles[0];
-    console.log(`Authenticated ${username} → role: ${roleName}`);
-
-    // 5. Parse role name to derive home directory.
-    // Strip leading "mft-" then split on "." — dots are the segment
-    // delimiter between carrier, partner, transfer-type, and env.
-    // Hyphens within segment names are preserved correctly with this approach.
-    const roleWithoutPrefix = roleName.replace(/^mft-/, "");
-    const parts = roleWithoutPrefix.split(".");
-
-    if (parts.length < 4) {
-      console.error(`Invalid role name format: ${roleName}`);
-      return {};
-    }
-
-    const env = parts[parts.length - 1];
-    const transferType = parts[parts.length - 2];
-    const partner = parts[parts.length - 3];
-    const carrier = parts.slice(0, parts.length - 3).join(".");
-
-    const s3Folder = ENV_FOLDER_MAP[env];
-    if (!s3Folder) {
-      console.error(`Unknown environment suffix in role name: ${env}`);
-      return {};
-    }
-
-    // 6. Construct role ARN and home directory.
-    // Account ID is extracted from the Lambda's own invoked ARN since
-    // Lambda runtime does not expose AWS_ACCOUNT_ID as an env var.
-    const accountId = context.invokedFunctionArn.split(":")[4];
-    const bucket = process.env.S3_BUCKET_NAME;
-
-    const roleArn = `arn:aws:iam::${accountId}:role/${roleName}`;
-    const homeDirectory = `/${bucket}/${s3Folder}/${carrier}/${partner}/${transferType}`;
-
-    // 7. Return Transfer Family authorization response
+    // 6. Return Transfer Family authorization response
     return {
       Role: roleArn,
       HomeDirectoryType: "LOGICAL",
@@ -948,7 +1040,7 @@ export const handler = async (event, context) => {
 
   } catch (err) {
     console.error("Auth Lambda error:", err);
-    return {};  // Return empty object to deny access on any error
+    return {};
   }
 };
 ```
@@ -1057,6 +1149,11 @@ resource "aws_iam_role_policy" "lambda_exec" {
       },
       {
         Effect   = "Allow"
+        Action   = ["dynamodb:GetItem"]
+        Resource = "arn:aws:dynamodb:${local.active_region}:${data.aws_caller_identity.active.account_id}:table/${var.prefix}-mft-users"
+      },
+      {
+        Effect   = "Allow"
         Action   = ["secretsmanager:GetSecretValue"]
         Resource = data.aws_secretsmanager_secret.entra_config.arn
       }
@@ -1086,19 +1183,430 @@ Contrast: when `identity_provider_type = "API_GATEWAY"`, Transfer Family **does*
 
 ---
 
+## DynamoDB Global Tables (`terraform/dynamodb.tf`)
+
+Four DynamoDB global tables are provisioned with replicas in both primary and DR regions. Global tables provide active-active replication — the Lambda in either region reads from its local replica with low latency, and failover requires no configuration change.
+
+All tables use on-demand billing and are provisioned in primary mode only (`count = var.dr_mode ? 0 : 1`). In DR mode they are referenced as data sources — global table replication means the data is already present in the DR region.
+
+### DynamoDB Gateway VPC Endpoint
+
+A DynamoDB gateway endpoint is provisioned in the VPC so the Lambda can reach DynamoDB without traversing the NAT gateway. Gateway endpoints are free and require no security group — they attach to route tables only.
+
+```hcl
+data "aws_route_tables" "private" {
+  provider = aws.active
+  vpc_id   = local.vpc_id
+
+  filter {
+    name   = "association.subnet-id"
+    values = local.private_subnet_ids
+  }
+}
+
+resource "aws_vpc_endpoint" "dynamodb" {
+  provider          = aws.active
+  vpc_id            = local.vpc_id
+  service_name      = "com.amazonaws.${local.active_region}.dynamodb"
+  vpc_endpoint_type = "Gateway"
+  route_table_ids   = data.aws_route_tables.private.ids
+  tags              = merge(local.common_tags, { Name = "${var.prefix}-mft-dynamodb-endpoint" })
+}
+```
+
+### Table Definitions
+
+```hcl
+# --- Carriers table ---
+resource "aws_dynamodb_table" "carriers" {
+  count        = var.dr_mode ? 0 : 1
+  provider     = aws.active
+  name         = "${var.prefix}-mft-carriers"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "carrierId"
+
+  stream_enabled   = true
+  stream_view_type = "NEW_AND_OLD_IMAGES"
+
+  attribute {
+    name = "carrierId"
+    type = "S"
+  }
+
+  replica {
+    region_name = var.dr_region
+  }
+
+  tags = merge(local.common_tags, { Name = "${var.prefix}-mft-carriers" })
+}
+
+# --- Partners table ---
+resource "aws_dynamodb_table" "partners" {
+  count        = var.dr_mode ? 0 : 1
+  provider     = aws.active
+  name         = "${var.prefix}-mft-partners"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "partnerId"
+
+  stream_enabled   = true
+  stream_view_type = "NEW_AND_OLD_IMAGES"
+
+  attribute {
+    name = "partnerId"
+    type = "S"
+  }
+
+  replica {
+    region_name = var.dr_region
+  }
+
+  tags = merge(local.common_tags, { Name = "${var.prefix}-mft-partners" })
+}
+
+# --- Transfer types table ---
+resource "aws_dynamodb_table" "transfer_types" {
+  count        = var.dr_mode ? 0 : 1
+  provider     = aws.active
+  name         = "${var.prefix}-mft-transfer-types"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "transferTypeId"
+
+  stream_enabled   = true
+  stream_view_type = "NEW_AND_OLD_IMAGES"
+
+  attribute {
+    name = "transferTypeId"
+    type = "S"
+  }
+
+  replica {
+    region_name = var.dr_region
+  }
+
+  tags = merge(local.common_tags, { Name = "${var.prefix}-mft-transfer-types" })
+}
+
+# --- Users table ---
+resource "aws_dynamodb_table" "users" {
+  count        = var.dr_mode ? 0 : 1
+  provider     = aws.active
+  name         = "${var.prefix}-mft-users"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "username"
+
+  stream_enabled   = true
+  stream_view_type = "NEW_AND_OLD_IMAGES"
+
+  attribute {
+    name = "username"
+    type = "S"
+  }
+
+  attribute {
+    name = "carrierId"
+    type = "S"
+  }
+
+  attribute {
+    name = "partnerId"
+    type = "S"
+  }
+
+  attribute {
+    name = "status"
+    type = "S"
+  }
+
+  global_secondary_index {
+    name            = "carrierId-index"
+    hash_key        = "carrierId"
+    projection_type = "ALL"
+  }
+
+  global_secondary_index {
+    name            = "partnerId-index"
+    hash_key        = "partnerId"
+    projection_type = "ALL"
+  }
+
+  global_secondary_index {
+    name            = "status-index"
+    hash_key        = "status"
+    projection_type = "ALL"
+  }
+
+  replica {
+    region_name = var.dr_region
+  }
+
+  tags = merge(local.common_tags, { Name = "${var.prefix}-mft-users" })
+}
+```
+
+### Table Schema Reference
+
+**`<prefix>-mft-carriers`**
+
+| Attribute | Type | Notes |
+|---|---|---|
+| `carrierId` | String (PK) | Lower kebab e.g. `acme-mutual` |
+| `name` | String | Title Case display name e.g. `Acme Mutual` |
+| `status` | String | `active` or `inactive` |
+| `createdAt` | String | ISO timestamp |
+| `updatedAt` | String | ISO timestamp |
+
+**`<prefix>-mft-partners`**
+
+| Attribute | Type | Notes |
+|---|---|---|
+| `partnerId` | String (PK) | Lower kebab e.g. `workday` |
+| `name` | String | Title Case display name e.g. `Workday` |
+| `status` | String | `active` or `inactive` |
+| `createdAt` | String | ISO timestamp |
+| `updatedAt` | String | ISO timestamp |
+
+**`<prefix>-mft-transfer-types`**
+
+| Attribute | Type | Notes |
+|---|---|---|
+| `transferTypeId` | String (PK) | Lower kebab e.g. `general-ledger` |
+| `name` | String | Title Case display name e.g. `General Ledger` |
+| `status` | String | `active` or `inactive` |
+| `createdAt` | String | ISO timestamp |
+| `updatedAt` | String | ISO timestamp |
+
+**`<prefix>-mft-users`**
+
+| Attribute | Type | Notes |
+|---|---|---|
+| `username` | String (PK) | Lower kebab dot-delimited e.g. `acme-mutual.workday.general-ledger.p` |
+| `carrierId` | String (GSI) | FK to carriers table |
+| `partnerId` | String (GSI) | FK to partners table |
+| `transferTypeId` | String | FK to transfer types table |
+| `env` | String | `p` or `np` |
+| `protocol` | String | `ftps`, `sftp`, or `as2` |
+| `clientId` | String | Entra app registration client ID (FTPS only) |
+| `publicKey` | String | SSH public key (SFTP only) |
+| `as2Id` | String | Partner AS2 ID (AS2 only) |
+| `as2CertArn` | String | Transfer Family imported certificate ARN (AS2 only) |
+| `contactEmail` | String | Partner contact for credential delivery and rotation notifications |
+| `internalOwner` | String | TMG staff member accountable for this connection |
+| `status` | String (GSI) | `active` or `disabled` |
+| `createdAt` | String | ISO timestamp |
+| `updatedAt` | String | ISO timestamp |
+
+---
+
 ## Sample Resources (`terraform/sample.tf`)
 
 All sample-specific resources are isolated in `terraform/sample.tf`. This file is removed entirely when the carrier and partner onboarding Terraform modules are built in Phase 2. Nothing in `sample.tf` is referenced by production infrastructure.
 
-`sample.tf` contains the sample partner session role — demonstrating the full partner onboarding pattern that Phase 2 will automate.
+`sample.tf` contains:
+- Sample IAM session roles for both FTPS and SFTP protocols
+- Sample DynamoDB seed data — carrier, partner, two transfer types, and two user records
 
-Note: there is no sample carrier KMS key. The shared S3 bucket uses the default KMS key for all Transfer Family writes regardless of carrier prefix. Per-carrier KMS keys are not relevant to the Transfer Family write path.
+Note: there is no sample carrier KMS key. The shared S3 bucket uses the default KMS key for all Transfer Family writes regardless of carrier prefix.
 
 ```hcl
 # =============================================================================
 # SAMPLE RESOURCES — Remove this file entirely in Phase 2 when carrier and
 # partner onboarding Terraform modules are built.
 # =============================================================================
+
+locals {
+  sample_timestamp = "2024-01-01T00:00:00Z"
+}
+
+# --- Sample DynamoDB seed data ---
+
+resource "aws_dynamodb_table_item" "sample_carrier" {
+  count      = var.dr_mode ? 0 : 1
+  provider   = aws.active
+  table_name = aws_dynamodb_table.carriers[0].name
+  hash_key   = "carrierId"
+
+  item = jsonencode({
+    carrierId  = { S = "sample-carrier" }
+    name       = { S = "Sample Carrier" }
+    status     = { S = "active" }
+    createdAt  = { S = local.sample_timestamp }
+    updatedAt  = { S = local.sample_timestamp }
+  })
+}
+
+resource "aws_dynamodb_table_item" "sample_partner" {
+  count      = var.dr_mode ? 0 : 1
+  provider   = aws.active
+  table_name = aws_dynamodb_table.partners[0].name
+  hash_key   = "partnerId"
+
+  item = jsonencode({
+    partnerId  = { S = "sample-partner" }
+    name       = { S = "Sample Partner" }
+    status     = { S = "active" }
+    createdAt  = { S = local.sample_timestamp }
+    updatedAt  = { S = local.sample_timestamp }
+  })
+}
+
+resource "aws_dynamodb_table_item" "sample_transfer_type_1" {
+  count      = var.dr_mode ? 0 : 1
+  provider   = aws.active
+  table_name = aws_dynamodb_table.transfer_types[0].name
+  hash_key   = "transferTypeId"
+
+  item = jsonencode({
+    transferTypeId = { S = "sample-transfer-1" }
+    name           = { S = "Sample Transfer 1" }
+    status         = { S = "active" }
+    createdAt      = { S = local.sample_timestamp }
+    updatedAt      = { S = local.sample_timestamp }
+  })
+}
+
+resource "aws_dynamodb_table_item" "sample_transfer_type_2" {
+  count      = var.dr_mode ? 0 : 1
+  provider   = aws.active
+  table_name = aws_dynamodb_table.transfer_types[0].name
+  hash_key   = "transferTypeId"
+
+  item = jsonencode({
+    transferTypeId = { S = "sample-transfer-2" }
+    name           = { S = "Sample Transfer 2" }
+    status         = { S = "active" }
+    createdAt      = { S = local.sample_timestamp }
+    updatedAt      = { S = local.sample_timestamp }
+  })
+}
+
+resource "aws_dynamodb_table_item" "sample_transfer_type_3" {
+  count      = var.dr_mode ? 0 : 1
+  provider   = aws.active
+  table_name = aws_dynamodb_table.transfer_types[0].name
+  hash_key   = "transferTypeId"
+
+  item = jsonencode({
+    transferTypeId = { S = "sample-transfer-3" }
+    name           = { S = "Sample Transfer 3" }
+    status         = { S = "active" }
+    createdAt      = { S = local.sample_timestamp }
+    updatedAt      = { S = local.sample_timestamp }
+  })
+}
+
+    carrierId      = { S = "sample-carrier" }
+    partnerId      = { S = "sample-partner" }
+    transferTypeId = { S = "sample-transfer-1" }
+    env            = { S = "np" }
+    protocol       = { S = "ftps" }
+    clientId       = { S = var.sample_ftps_entra_client_id }
+    contactEmail   = { S = "sample-partner@example.com" }
+    internalOwner  = { S = "mft-owner@${var.prefix}.com" }
+    status         = { S = "active" }
+    createdAt      = { S = local.sample_timestamp }
+    updatedAt      = { S = local.sample_timestamp }
+  })
+}
+
+    carrierId      = { S = "sample-carrier" }
+    partnerId      = { S = "sample-partner" }
+    transferTypeId = { S = "sample-transfer-2" }
+    env            = { S = "np" }
+    protocol       = { S = "sftp" }
+    publicKey      = { S = var.sample_sftp_ssh_public_key }
+    contactEmail   = { S = "sample-partner@example.com" }
+    internalOwner  = { S = "mft-owner@${var.prefix}.com" }
+    status         = { S = "active" }
+    createdAt      = { S = local.sample_timestamp }
+    updatedAt      = { S = local.sample_timestamp }
+  })
+}
+
+    carrierId      = { S = "sample-carrier" }
+    partnerId      = { S = "sample-partner" }
+    transferTypeId = { S = "sample-transfer-3" }
+    env            = { S = "np" }
+    protocol       = { S = "sftp" }
+    clientId       = { S = var.sample_sftp_entra_client_id }
+    contactEmail   = { S = "sample-partner@example.com" }
+    internalOwner  = { S = "mft-owner@${var.prefix}.com" }
+    status         = { S = "active" }
+    createdAt      = { S = local.sample_timestamp }
+    updatedAt      = { S = local.sample_timestamp }
+  })
+}
+```
+
+# Sample user records — username is purely a DynamoDB lookup key.
+# Role ARN, home directory, and auth config are derived entirely from the
+# record fields. Partners can use any username — it has no structural
+# requirements and is completely decoupled from the Entra client ID or role.
+
+resource "aws_dynamodb_table_item" "sample_user_ftps_simple" {
+  count      = var.dr_mode ? 0 : 1
+  provider   = aws.active
+  table_name = aws_dynamodb_table.users[0].name
+  hash_key   = "username"
+
+  item = jsonencode({
+    username       = { S = "sample-ftps-test" }
+    carrierId      = { S = "sample-carrier" }
+    partnerId      = { S = "sample-partner" }
+    transferTypeId = { S = "sample-transfer-1" }
+    env            = { S = "np" }
+    protocol       = { S = "ftps" }
+    clientId       = { S = var.sample_ftps_entra_client_id }
+    contactEmail   = { S = "sample-partner@example.com" }
+    internalOwner  = { S = "mft-owner@${var.prefix}.com" }
+    status         = { S = "active" }
+    createdAt      = { S = local.sample_timestamp }
+    updatedAt      = { S = local.sample_timestamp }
+  })
+}
+
+resource "aws_dynamodb_table_item" "sample_user_sftp_ssh_simple" {
+  count      = var.dr_mode ? 0 : 1
+  provider   = aws.active
+  table_name = aws_dynamodb_table.users[0].name
+  hash_key   = "username"
+
+  item = jsonencode({
+    username       = { S = "sample-sftp-test" }
+    carrierId      = { S = "sample-carrier" }
+    partnerId      = { S = "sample-partner" }
+    transferTypeId = { S = "sample-transfer-2" }
+    env            = { S = "np" }
+    protocol       = { S = "sftp" }
+    publicKey      = { S = var.sample_sftp_ssh_public_key }
+    contactEmail   = { S = "sample-partner@example.com" }
+    internalOwner  = { S = "mft-owner@${var.prefix}.com" }
+    status         = { S = "active" }
+    createdAt      = { S = local.sample_timestamp }
+    updatedAt      = { S = local.sample_timestamp }
+  })
+}
+
+resource "aws_dynamodb_table_item" "sample_user_sftp_entra_simple" {
+  count      = var.dr_mode ? 0 : 1
+  provider   = aws.active
+  table_name = aws_dynamodb_table.users[0].name
+  hash_key   = "username"
+
+  item = jsonencode({
+    username       = { S = "sample-sftp-entra-test" }
+    carrierId      = { S = "sample-carrier" }
+    partnerId      = { S = "sample-partner" }
+    transferTypeId = { S = "sample-transfer-3" }
+    env            = { S = "np" }
+    protocol       = { S = "sftp" }
+    clientId       = { S = var.sample_sftp_entra_client_id }
+    contactEmail   = { S = "sample-partner@example.com" }
+    internalOwner  = { S = "mft-owner@${var.prefix}.com" }
+    status         = { S = "active" }
+    createdAt      = { S = local.sample_timestamp }
+    updatedAt      = { S = local.sample_timestamp }
+  })
+}
 
 # --- Sample partner session role ---
 # Demonstrates the partner session role pattern. Partner onboarding Terraform
@@ -1396,10 +1904,10 @@ The carrier and partner onboarding Terraform modules consume the following SSM p
 The default KMS key ARN is intentionally excluded — carrier onboarding provisions its own carrier-specific KMS key and partner onboarding references the carrier key directly. The default key is only relevant for objects written before any carrier is onboarded and is not needed by onboarding automation.
 
 The partner onboarding Terraform must also provision:
-- An Entra ID app registration for the partner (client ID and secret)
-- An app role on the Lambda app registration with value matching the IAM role name: `mft-<carrier>.<partner>.<transfer-type>.<env>` where env is `p` (production) or `np` (non-production)
-- Assign that app role to the partner's service principal via Graph API
-- An IAM session role named `mft-<carrier>.<partner>.<transfer-type>.<env>` with S3 permissions scoped to both `<bucket>/production/<carrier>/<partner>/<transfer-type>/*` and `<bucket>/non-production/<carrier>/<partner>/<transfer-type>/*` and KMS decrypt/generate on the **bucket default key** (Transfer Family always writes using the bucket default key)
+- For FTPS: an Entra ID app registration (client ID and secret), an app role on the Lambda app registration with value matching the IAM role name, assigned to the partner service principal via Graph API
+- For SFTP: the partner's SSH public key stored in the DynamoDB users table record
+- An IAM session role named `mft-<carrierId>.<partnerId>.<transferTypeId>.<env>` with S3 permissions scoped to both `<bucket>/production/<carrierId>/<partnerId>/<transferTypeId>/*` and `<bucket>/non-production/<carrierId>/<partnerId>/<transferTypeId>/*` and KMS decrypt/generate on the bucket default key
+- DynamoDB records in carriers, partners, transfer-types, and users tables as appropriate
 
 ---
 
@@ -1455,4 +1963,6 @@ On DR failback: destroy DR state → re-apply primary state. Primary state detec
 
 13. **`commit_hash`, `git_repository`, and `allowed_cidr_blocks`** — injected automatically by Terraflow from environment variables (`GIT_COMMIT_SHA`, `GITHUB_REPOSITORY`, `ALLOWED_CIDR_BLOCKS`). Applied exclusively via `common_tags` for the first two. Not used in any resource name or identifier. Do not add these to command line `-var` arguments.
 
-14. **No `aws_transfer_user` resources** — with `AWS_LAMBDA` identity provider, Transfer Family has no native user objects. All user concerns are handled dynamically by the Lambda response. Do not create any `aws_transfer_user` or `aws_transfer_ssh_key` resources.
+14. **DynamoDB global tables** — provisioned with `count = var.dr_mode ? 0 : 1`. Each table includes a `replica { region_name = var.dr_region }` block for global table replication. The DynamoDB gateway endpoint is associated with private subnet route tables only — use `data.aws_route_tables.private` not the public route tables.
+
+15. **No `aws_transfer_user` resources** — with `AWS_LAMBDA` identity provider, Transfer Family has no native user objects. All user concerns are handled dynamically by the Lambda response. Do not create any `aws_transfer_user` or `aws_transfer_ssh_key` resources.

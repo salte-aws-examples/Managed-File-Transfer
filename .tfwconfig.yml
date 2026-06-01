@@ -15,3 +15,6 @@ variables:
   commit_hash: "${GIT_COMMIT_SHA}"
   allowed_cidr_blocks: "${ALLOWED_CIDR_BLOCKS}"
   public_hosted_zone_name: "${PUBLIC_HOSTED_ZONE_NAME}"
+  sample_ftps_entra_client_id: "${SAMPLE_FTPS_ENTRA_CLIENT_ID}"
+  sample_sftp_entra_client_id: "${SAMPLE_SFTP_ENTRA_CLIENT_ID}"
+  sample_sftp_ssh_public_key: "${SAMPLE_SFTP_SSH_PUBLIC_KEY}"

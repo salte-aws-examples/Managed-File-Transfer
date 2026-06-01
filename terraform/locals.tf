@@ -37,4 +37,6 @@ locals {
   }
 
   entra_config_secret = "${var.prefix}/mft/entra"
+
+  vpc_id = data.aws_vpc.this.id
 }

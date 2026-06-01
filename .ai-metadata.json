@@ -1,10 +1,10 @@
 {
   "files": {
     ".tfwconfig.yml": {
-      "lines_total": 19,
-      "lines_ai_generated": 19,
+      "lines_total": 20,
+      "lines_ai_generated": 20,
       "ai_percentage": 100,
-      "last_updated": "2026-05-25T13:50:00Z",
+      "last_updated": "2026-05-28T17:00:00Z",
       "tool": "cursor"
     },
     ".env.example": {
@@ -29,10 +29,10 @@
       "tool": "cursor"
     },
     "README.md": {
-      "lines_total": 235,
-      "lines_ai_generated": 235,
+      "lines_total": 300,
+      "lines_ai_generated": 300,
       "ai_percentage": 100,
-      "last_updated": "2026-05-28T14:40:00Z",
+      "last_updated": "2026-05-28T20:00:00Z",
       "tool": "cursor"
     },
     ".cursor/rules/terraform.mdc": {
@@ -64,24 +64,24 @@
       "tool": "cursor"
     },
     "terraform/inputs.tf": {
-      "lines_total": 51,
-      "lines_ai_generated": 51,
+      "lines_total": 67,
+      "lines_ai_generated": 67,
       "ai_percentage": 100,
-      "last_updated": "2026-05-28T14:33:00Z",
+      "last_updated": "2026-05-28T20:00:00Z",
       "tool": "cursor"
     },
     "terraform/locals.tf": {
-      "lines_total": 41,
-      "lines_ai_generated": 41,
+      "lines_total": 42,
+      "lines_ai_generated": 42,
       "ai_percentage": 100,
-      "last_updated": "2026-05-28T14:33:00Z",
+      "last_updated": "2026-05-28T16:00:00Z",
       "tool": "cursor"
     },
     "terraform/iam.tf": {
-      "lines_total": 144,
-      "lines_ai_generated": 144,
+      "lines_total": 149,
+      "lines_ai_generated": 149,
       "ai_percentage": 100,
-      "last_updated": "2026-05-28T15:10:00Z",
+      "last_updated": "2026-05-28T16:00:00Z",
       "tool": "cursor"
     },
     "terraform/main.tf": {
@@ -92,31 +92,31 @@
       "tool": "cursor"
     },
     "terraform/sample.tf": {
-      "lines_total": 72,
-      "lines_ai_generated": 72,
+      "lines_total": 344,
+      "lines_ai_generated": 344,
       "ai_percentage": 100,
-      "last_updated": "2026-05-28T14:33:00Z",
+      "last_updated": "2026-05-28T23:00:00Z",
       "tool": "cursor"
     },
     "terraform/lambda.tf": {
       "lines_total": 52,
       "lines_ai_generated": 52,
       "ai_percentage": 100,
-      "last_updated": "2026-05-28T14:33:00Z",
+      "last_updated": "2026-05-28T19:00:00Z",
       "tool": "cursor"
     },
     "src/main/auth/index.ts": {
-      "lines_total": 159,
-      "lines_ai_generated": 159,
+      "lines_total": 237,
+      "lines_ai_generated": 237,
       "ai_percentage": 100,
-      "last_updated": "2026-05-28T14:33:00Z",
+      "last_updated": "2026-05-29T00:00:00Z",
       "tool": "cursor"
     },
     "src/test/auth/index.test.ts": {
-      "lines_total": 94,
-      "lines_ai_generated": 94,
+      "lines_total": 357,
+      "lines_ai_generated": 357,
       "ai_percentage": 100,
-      "last_updated": "2026-05-28T14:33:00Z",
+      "last_updated": "2026-05-29T00:00:00Z",
       "tool": "cursor"
     },
     "terraform/data.tf": {
@@ -127,10 +127,10 @@
       "tool": "cursor"
     },
     "SPECIFICATION.md": {
-      "lines_total": 1458,
-      "lines_ai_generated": 1458,
+      "lines_total": 1848,
+      "lines_ai_generated": 1848,
       "ai_percentage": 100,
-      "last_updated": "2026-05-28T14:33:00Z",
+      "last_updated": "2026-05-28T19:00:00Z",
       "tool": "cursor"
     },
     "terraform/dns.tf": {
@@ -138,6 +138,13 @@
       "lines_ai_generated": 100,
       "ai_percentage": 100,
       "last_updated": "2026-05-28T14:33:00Z",
+      "tool": "cursor"
+    },
+    "terraform/dynamodb.tf": {
+      "lines_total": 145,
+      "lines_ai_generated": 145,
+      "ai_percentage": 100,
+      "last_updated": "2026-05-28T22:00:00Z",
       "tool": "cursor"
     },
     "terraform/outputs.tf": {
@@ -148,10 +155,10 @@
       "tool": "cursor"
     },
     "package.json": {
-      "lines_total": 39,
-      "lines_ai_generated": 39,
+      "lines_total": 40,
+      "lines_ai_generated": 40,
       "ai_percentage": 100,
-      "last_updated": "2026-05-28T13:26:00Z",
+      "last_updated": "2026-05-28T16:00:00Z",
       "tool": "cursor"
     },
     "tsconfig.json": {

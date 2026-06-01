@@ -3,12 +3,11 @@
 #
 # Transfer Family invokes this Lambda directly for every SFTP and FTPS
 # authentication attempt. The Lambda validates partner credentials against
-# Entra ID via the OAuth2 client credentials flow, then deterministically
-# derives the session IAM role and home directory from the username.
+# Entra ID or SSH public key auth, then derives the session IAM role and home
+# directory from the DynamoDB user record.
 #
-# Source lives at <project_root>/lambda/auth/. The archive_file data source
-# zips it on every apply and source_code_hash forces a redeploy when the
-# source changes.
+# Source: src/main/auth/index.ts — bundled to .build/lambda/auth/index.js via
+# npm run build:lambda. Terraform zips .build/lambda/auth on apply.
 ################################################################################
 
 data "archive_file" "auth_lambda" {
@@ -20,7 +19,7 @@ data "archive_file" "auth_lambda" {
 resource "aws_lambda_function" "auth" {
   provider         = aws.active
   function_name    = "${var.prefix}-mft-auth"
-  description      = "Transfer Family identity provider — validates partner credentials against Entra ID and derives session role and home directory from username"
+  description      = "Transfer Family identity provider — looks up partner in DynamoDB, validates credentials against Entra ID (FTPS) or SSH public key (SFTP), returns session role and home directory"
   runtime          = "nodejs20.x"
   handler          = "index.handler"
   role             = aws_iam_role.lambda_exec.arn
@@ -38,6 +37,7 @@ resource "aws_lambda_function" "auth" {
     variables = {
       ENTRA_CONFIG_SECRET = local.entra_config_secret
       S3_BUCKET_NAME      = local.source_bucket_name
+      USERS_TABLE         = "${var.prefix}-mft-users"
     }
   }
 

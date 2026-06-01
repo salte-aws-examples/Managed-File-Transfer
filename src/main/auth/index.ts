@@ -1,19 +1,19 @@
 import {
+  DynamoDBClient,
+  GetItemCommand,
+} from "@aws-sdk/client-dynamodb";
+import {
   GetSecretValueCommand,
   SecretsManagerClient,
 } from "@aws-sdk/client-secrets-manager";
 
 const secrets = new SecretsManagerClient({});
-
-// Role name environment suffix → S3 folder mapping
-const ENV_FOLDER_MAP: Record<string, string> = {
-  p: "production",
-  np: "non-production",
-};
+const dynamo = new DynamoDBClient({});
 
 type TransferAuthEvent = {
   username?: string;
   password?: string;
+  publicKey?: string;
 };
 
 type LambdaContext = {
@@ -28,113 +28,128 @@ type TransferAuthResponse =
       HomeDirectoryDetails: string;
     };
 
+async function authenticateWithEntra(
+  username: string,
+  password: string,
+  clientId: string,
+  carrierId: string,
+  partnerId: string,
+  transferId: string,
+  env: string,
+): Promise<boolean> {
+  const secretResponse = await secrets.send(
+    new GetSecretValueCommand({ SecretId: process.env.ENTRA_CONFIG_SECRET }),
+  );
+  const { entra_tenant_id, entra_client_id } = JSON.parse(
+    secretResponse.SecretString ?? "{}",
+  ) as {
+    entra_tenant_id?: string;
+    entra_client_id?: string;
+  };
+
+  if (!entra_tenant_id || !entra_client_id) {
+    console.error("Missing entra_tenant_id or entra_client_id in secret");
+    return false;
+  }
+
+  const scope = `api://${entra_client_id}/.default`;
+  const tokenUrl = `https://login.microsoftonline.com/${entra_tenant_id}/oauth2/v2.0/token`;
+
+  const body = new URLSearchParams({
+    grant_type: "client_credentials",
+    client_id: clientId,
+    client_secret: password,
+    scope,
+  });
+
+  const tokenResponse = await fetch(tokenUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: body.toString(),
+  });
+
+  if (!tokenResponse.ok) {
+    console.error(
+      `Entra ID auth failed for ${username}: ${tokenResponse.status}`,
+    );
+    return false;
+  }
+
+  const tokenData = (await tokenResponse.json()) as { access_token: string };
+  const [, payloadB64] = tokenData.access_token.split(".");
+  const jwtPayload = JSON.parse(
+    Buffer.from(payloadB64, "base64url").toString(),
+  ) as { aud?: string; roles?: string[] };
+
+  if (jwtPayload.aud !== `api://${entra_client_id}`) {
+    console.error(`Invalid token audience: ${jwtPayload.aud}`);
+    return false;
+  }
+
+  // Validate roles claim matches DynamoDB record exactly.
+  // Format: mft-<carrierId>.<partnerId>.<transferTypeId>.<env>
+  // Neither Entra nor DynamoDB alone is sufficient — both must agree.
+  const roleName = jwtPayload.roles?.[0];
+  if (!roleName) {
+    console.error(`No roles claim in token for ${username}`);
+    return false;
+  }
+  const roleWithoutPrefix = roleName.replace(/^mft-/, "");
+  const [roleCarrier, rolePartner, roleTransfer, roleEnv] =
+    roleWithoutPrefix.split(".");
+
+  if (
+    roleCarrier !== carrierId ||
+    rolePartner !== partnerId ||
+    roleTransfer !== transferId ||
+    roleEnv !== env
+  ) {
+    console.error(`Role claim mismatch for ${username}: token=${roleName}`);
+    return false;
+  }
+
+  return true;
+}
+
 export const handler = async (
   event: TransferAuthEvent,
   context: LambdaContext,
 ): Promise<TransferAuthResponse> => {
-  const { username, password } = event ?? {};
+  console.log("Full event:", JSON.stringify(event));
+
+  const { username, password, publicKey } = event ?? {};
 
   try {
-    if (!username || !password) {
-      console.error("Missing username or password");
+    if (!username) {
+      console.error("Missing username");
       return {};
     }
 
-    // 1. Fetch Entra config from Secrets Manager at runtime.
-    // Intentionally not cached — secret rotations take effect immediately.
-    // Secret is a JSON object with keys: entra_tenant_id, entra_client_id, entra_client_secret
-    const secretId = process.env.ENTRA_CONFIG_SECRET;
-    const secretResponse = await secrets.send(
-      new GetSecretValueCommand({ SecretId: secretId }),
+    // 1. Look up username in DynamoDB users table.
+    const tableResult = await dynamo.send(
+      new GetItemCommand({
+        TableName: process.env.USERS_TABLE,
+        Key: { username: { S: username } },
+      }),
     );
-    const { entra_tenant_id, entra_client_id } = JSON.parse(
-      secretResponse.SecretString ?? "{}",
-    ) as {
-      entra_tenant_id?: string;
-      entra_client_id?: string;
-      entra_client_secret?: string;
-    };
 
-    if (!entra_tenant_id || !entra_client_id) {
-      console.error("Missing entra_tenant_id or entra_client_id in secret");
+    const item = tableResult.Item;
+    if (!item) {
+      console.error(`Unknown username: ${username}`);
+      return {};
+    }
+    if (item.status.S !== "active") {
+      console.error(`Disabled username: ${username}`);
       return {};
     }
 
-    // 2. Validate partner credentials against Entra ID token endpoint.
-    // The .default suffix is required by Entra ID for client credentials
-    // flow against custom APIs — named scopes are not supported in this flow.
-    const scope = `api://${entra_client_id}/.default`;
-    const tokenUrl = `https://login.microsoftonline.com/${entra_tenant_id}/oauth2/v2.0/token`;
+    const protocol = item.protocol.S!;
+    const carrierId = item.carrierId.S!;
+    const partnerId = item.partnerId.S!;
+    const transferId = item.transferTypeId.S!;
+    const env = item.env.S!;
+    const storedKey = item.publicKey?.S;
 
-    const body = new URLSearchParams({
-      grant_type: "client_credentials",
-      client_id: username, // Partner's Entra ID app registration client ID
-      client_secret: password, // Partner's Entra ID app registration client secret
-      scope,
-    });
-
-    const tokenResponse = await fetch(tokenUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: body.toString(),
-    });
-
-    if (!tokenResponse.ok) {
-      console.error(
-        `Entra ID auth failed for ${username}: ${tokenResponse.status}`,
-      );
-      return {};
-    }
-
-    const tokenData = (await tokenResponse.json()) as { access_token: string };
-
-    // 3. Decode and validate JWT audience claim.
-    // Signature verification is provided by the TLS channel to the Entra ID token endpoint.
-    const [, payloadB64] = tokenData.access_token.split(".");
-    const payload = JSON.parse(
-      Buffer.from(payloadB64, "base64url").toString(),
-    ) as { aud?: string; roles?: string[] };
-
-    const expectedAudience = `api://${entra_client_id}`;
-    if (payload.aud !== expectedAudience) {
-      console.error(`Invalid token audience: ${payload.aud}`);
-      return {};
-    }
-
-    // 4. Read IAM role name from the roles claim.
-    // Format: mft-<carrier>.<partner>.<transfer-type>.<env>
-    if (!payload.roles || payload.roles.length === 0) {
-      console.error(`No roles claim in token for ${username}`);
-      return {};
-    }
-
-    const roleName = payload.roles[0];
-    console.log(`Authenticated ${username} → role: ${roleName}`);
-
-    // 5. Parse role name to derive home directory.
-    // Strip leading "mft-" then split on "." — dots are the segment delimiter
-    // between carrier, partner, transfer-type, and env. Hyphens within segment
-    // names are preserved correctly with this approach.
-    const roleWithoutPrefix = roleName.replace(/^mft-/, "");
-    const parts = roleWithoutPrefix.split(".");
-
-    if (parts.length < 4) {
-      console.error(`Invalid role name format: ${roleName}`);
-      return {};
-    }
-
-    const env = parts[parts.length - 1];
-    const transferType = parts[parts.length - 2];
-    const partner = parts[parts.length - 3];
-    const carrier = parts.slice(0, parts.length - 3).join(".");
-
-    const s3Folder = ENV_FOLDER_MAP[env];
-    if (!s3Folder) {
-      console.error(`Unknown environment suffix in role name: ${env}`);
-      return {};
-    }
-
-    // 6. Construct role ARN and home directory.
     const accountId = context.invokedFunctionArn.split(":")[4];
     const bucket = process.env.S3_BUCKET_NAME;
 
@@ -143,8 +158,72 @@ export const handler = async (
       return {};
     }
 
-    const roleArn = `arn:aws:iam::${accountId}:role/${roleName}`;
-    const homeDirectory = `/${bucket}/${s3Folder}/${carrier}/${partner}/${transferType}`;
+    const s3Folder = env === "p" ? "production" : "non-production";
+    const roleArn = `arn:aws:iam::${accountId}:role/mft-${carrierId}.${partnerId}.${transferId}.${env}`;
+    const homeDirectory = `/${bucket}/${s3Folder}/${carrierId}/${partnerId}/${transferId}`;
+
+    // User existence check — Transfer Family invokes the Lambda with no
+    // credentials before the actual credential challenge for SFTP connections.
+    // Return a minimal valid session response to confirm the user exists.
+    if (!publicKey && !password) {
+      console.log(
+        `User existence check for ${username} — returning session stub`,
+      );
+      return {
+        Role: roleArn,
+        HomeDirectoryType: "LOGICAL",
+        HomeDirectoryDetails: JSON.stringify([
+          { Entry: "/", Target: homeDirectory },
+        ]),
+      };
+    }
+
+    // 2. Branch on protocol and credential type:
+    //    ftps              → always Entra ID
+    //    sftp + publicKey  → SSH key auth
+    //    sftp + no key     → Entra ID
+    if (protocol === "ftps" || (protocol === "sftp" && !storedKey)) {
+      if (!password) {
+        console.error(`Missing password for ${username}`);
+        return {};
+      }
+
+      const clientId = item.clientId?.S;
+      if (!clientId) {
+        console.error(`No Entra client ID stored for ${username}`);
+        return {};
+      }
+
+      const authenticated = await authenticateWithEntra(
+        username,
+        password,
+        clientId,
+        carrierId,
+        partnerId,
+        transferId,
+        env,
+      );
+      if (!authenticated) {
+        return {};
+      }
+
+      console.log(`${protocol.toUpperCase()} Entra authenticated: ${username}`);
+    } else if (protocol === "sftp" && storedKey) {
+      if (!publicKey) {
+        console.error(
+          `Expected SSH key auth for ${username} but no public key in event`,
+        );
+        return {};
+      }
+      if (publicKey.trim() !== storedKey.trim()) {
+        console.error(`Public key mismatch for ${username}`);
+        return {};
+      }
+      console.log(`SFTP SSH key authenticated: ${username}`);
+    } else {
+      console.error(`Unsupported protocol: ${protocol}`);
+      return {};
+    }
 
     return {
       Role: roleArn,
@@ -156,4 +235,3 @@ export const handler = async (
     return {};
   }
 };
-
