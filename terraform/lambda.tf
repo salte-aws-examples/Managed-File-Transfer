@@ -7,14 +7,8 @@
 # directory from the DynamoDB user record.
 #
 # Source: src/main/auth/index.ts — bundled to .build/lambda/auth/index.js via
-# npm run build:lambda. Terraform zips .build/lambda/auth on apply.
+# npm run build:lambda. Terraform zips .build/lambda/auth on apply (see data.tf).
 ################################################################################
-
-data "archive_file" "auth_lambda" {
-  type        = "zip"
-  source_dir  = "${path.module}/../.build/lambda/auth"
-  output_path = "${path.module}/../.build/lambda/auth.zip"
-}
 
 resource "aws_lambda_function" "auth" {
   provider         = aws.active

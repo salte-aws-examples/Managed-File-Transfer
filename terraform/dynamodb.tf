@@ -1,16 +1,6 @@
 ################################################################################
 # DynamoDB gateway VPC endpoint — private subnet route tables only
 ################################################################################
-data "aws_route_tables" "private" {
-  provider = aws.active
-  vpc_id   = local.vpc_id
-
-  filter {
-    name   = "association.subnet-id"
-    values = local.private_subnet_ids
-  }
-}
-
 resource "aws_vpc_endpoint" "dynamodb" {
   provider          = aws.active
   vpc_id            = local.vpc_id

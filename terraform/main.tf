@@ -167,19 +167,6 @@ resource "aws_kms_alias" "default_replica" {
   target_key_id = aws_kms_replica_key.default[0].key_id
 }
 
-# Default key — data sources for DR mode (look up by alias in both regions)
-data "aws_kms_key" "default_active" {
-  count    = var.dr_mode ? 1 : 0
-  provider = aws.active
-  key_id   = "alias/${var.prefix}-mft-default"
-}
-
-data "aws_kms_key" "default_passive" {
-  count    = var.dr_mode ? 1 : 0
-  provider = aws.passive
-  key_id   = "alias/${var.prefix}-mft-default"
-}
-
 ################################################################################
 # S3 primary + DR buckets — created in primary mode only
 ################################################################################
@@ -299,21 +286,6 @@ resource "aws_s3_bucket_lifecycle_configuration" "dr" {
       noncurrent_days = 90
     }
   }
-}
-
-################################################################################
-# S3 bucket data sources — DR mode only
-################################################################################
-data "aws_s3_bucket" "source" {
-  count    = var.dr_mode ? 1 : 0
-  provider = aws.active
-  bucket   = local.source_bucket_name
-}
-
-data "aws_s3_bucket" "replica" {
-  count    = var.dr_mode ? 1 : 0
-  provider = aws.passive
-  bucket   = local.replica_bucket_name
 }
 
 ################################################################################

@@ -39,14 +39,8 @@ resource "aws_acm_certificate_validation" "mft" {
 
 ################################################################################
 # Hosted zones — public is a data source; private is managed in primary mode
-# and referenced as a data source in DR mode
+# and referenced as a data source in DR mode (see data.tf)
 ################################################################################
-data "aws_route53_zone" "public" {
-  provider     = aws.active
-  name         = var.public_hosted_zone_name
-  private_zone = false
-}
-
 resource "aws_route53_zone" "private" {
   count    = var.dr_mode ? 0 : 1
   provider = aws.active
@@ -58,13 +52,6 @@ resource "aws_route53_zone" "private" {
   }
 
   tags = merge(local.common_tags, { Name = "${local.private_hosted_zone_name}-private" })
-}
-
-data "aws_route53_zone" "private" {
-  count        = var.dr_mode ? 1 : 0
-  provider     = aws.active
-  name         = local.private_hosted_zone_name
-  private_zone = true
 }
 
 # DR mode: associate the pre-existing private hosted zone with the DR VPC
