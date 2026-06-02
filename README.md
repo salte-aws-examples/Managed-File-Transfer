@@ -86,33 +86,28 @@ In DR mode the topology is mirrored into `var.dr_region`: the Transfer Family se
 
 This stack uses **Transfer Family `AWS_LAMBDA` identity provider**. There are no `aws_transfer_user` resources — every SFTP/FTPS session is authorized dynamically by the Lambda response.
 
-### Username convention
+### Username
 
-The Transfer Family username is a structured identifier, not an Entra GUID:
+The Transfer Family username is the **DynamoDB lookup key** for the `users` table. It can be any string — there is no required format. Partners type this value to connect; role ARN, home directory, Entra client ID, and S3 path are all derived from the DynamoDB record fields, not parsed from the username.
 
-```
-<carrierId>.<partnerId>.<transferTypeId>.<env>
-```
-
-Example: `sample-carrier.sample-partner.sample-transfer-1.np`
-
-Each segment maps to a DynamoDB lookup table record. The username is the primary key in the `users` table.
+A structured convention such as `<carrierId>.<partnerId>.<transferTypeId>.<env>` is optional and may be used by onboarding automation, but it is not enforced by the Lambda.
 
 ### Auth flow
 
-On every SFTP/FTPS connect, Transfer Family invokes the auth Lambda with `{ username, password?, publicKey? }`. The Lambda:
+On every SFTP/FTPS connect, Transfer Family invokes the auth Lambda with `{ username, password? }`. The Lambda does not read `event.publicKey` — SSH key authentication is delegated to Transfer Family via the `PublicKeys` response field.
 
 1. **Looks up** `username` in DynamoDB (`USERS_TABLE`). Deny (`{}`) if not found.
 2. **Checks status** — deny if `status !== "active"`. This is the first denial gate after lookup, before any credential validation.
-3. **Routes by protocol and stored credentials:**
+3. **Derives session** — `roleArn` and `homeDirectory` from DynamoDB record fields (`carrierId`, `partnerId`, `transferTypeId`, `env`).
+4. **Routes by protocol and stored credentials:**
 
-| Protocol | `publicKey` in DynamoDB | Credential validation |
+| Protocol | `publicKey` in DynamoDB | Lambda behavior |
 |---|---|---|
-| `ftps` | n/a | Entra ID client credentials (`password` = client secret) |
-| `sftp` | yes | SSH public key match (`event.publicKey` vs stored key) |
-| `sftp` | no | Entra ID client credentials |
+| `ftps` | n/a | Requires `password`; validates via Entra ID + JWT `roles` claim |
+| `sftp` | yes | No password required; returns session + `PublicKeys: [storedKey]`; Transfer Family validates the client key |
+| `sftp` | no | Requires `password`; validates via Entra ID + JWT `roles` claim |
 
-4. **Entra paths** — fetch Lambda app config from Secrets Manager (`ENTRA_CONFIG_SECRET`), request a token using the **partner's** `clientId` from the DynamoDB record (not the username), validate JWT audience, then validate the JWT `roles[0]` claim matches the DynamoDB record exactly:
+5. **Entra paths** — fetch Lambda app config from Secrets Manager (`ENTRA_CONFIG_SECRET`), request a token using the **partner's** `clientId` from the DynamoDB record (not the username), validate JWT audience, then validate the JWT `roles[0]` claim matches the DynamoDB record exactly:
 
    ```
    mft-<carrierId>.<partnerId>.<transferTypeId>.<env>
@@ -120,12 +115,76 @@ On every SFTP/FTPS connect, Transfer Family invokes the auth Lambda with `{ user
 
    Neither Entra nor DynamoDB alone is sufficient — both must agree.
 
-5. **On success** — return a session role ARN and logical home directory derived from DynamoDB fields:
+6. **On success** — return a Transfer Family authorization response:
 
-   - **Role ARN**: `arn:aws:iam::<account-id>:role/mft-<carrierId>.<partnerId>.<transferTypeId>.<env>`
-   - **Home directory**: `/<bucket>/<production|non-production>/<carrierId>/<partnerId>/<transferTypeId>`
+   ```json
+   {
+     "Role": "arn:aws:iam::<account-id>:role/mft-<carrierId>.<partnerId>.<transferTypeId>.<env>",
+     "HomeDirectoryType": "LOGICAL",
+     "HomeDirectoryDetails": "[{\"Entry\":\"/\",\"Target\":\"/<bucket>/<production|non-production>/<carrierId>/<partnerId>/<transferTypeId>\"}]",
+     "PublicKeys": ["ssh-rsa AAAA..."]
+   }
+   ```
 
-   Where `production` maps to `env = p` and `non-production` maps to `env = np`.
+   `PublicKeys` is included only for SFTP users with a stored public key in DynamoDB. `production` maps to `env = p` and `non-production` maps to `env = np`.
+
+### DynamoDB schema
+
+Four global tables (replicated to the DR region) store partner routing configuration. The auth Lambda reads only the `users` table at connect time; lookup tables support onboarding and reporting.
+
+```
+┌─────────────────────────────┐       ┌─────────────────────────────┐
+│  <prefix>-mft-carriers      │       │  <prefix>-mft-partners      │
+├─────────────────────────────┤       ├─────────────────────────────┤
+│ PK  carrierId      String   │       │ PK  partnerId      String   │
+│     name           String   │       │     name           String   │
+│     status         String   │       │     status         String   │
+│     createdAt      String   │       │     createdAt      String   │
+│     updatedAt      String   │       │     updatedAt      String   │
+└──────────────┬──────────────┘       └──────────────┬──────────────┘
+               │                                      │
+               │         ┌────────────────────────────┼────────────────────────────┐
+               │         │                            │                            │
+               │         │  ┌─────────────────────────▼─────────────────────────┐  │
+               │         │  │  <prefix>-mft-transfer-types                      │  │
+               │         │  ├───────────────────────────────────────────────────┤  │
+               │         │  │ PK  transferTypeId   String                       │  │
+               │         │  │     name             String                       │  │
+               │         │  │     status           String                       │  │
+               │         │  │     createdAt        String                       │  │
+               │         │  │     updatedAt        String                       │  │
+               │         │  └─────────────────────────┬─────────────────────────┘  │
+               │         │                            │                            │
+               └─────────┼────────────────────────────┼────────────────────────────┘
+                         │                            │
+                         │    logical FKs (not enforced by DynamoDB)
+                         ▼                            ▼
+               ┌─────────────────────────────────────────────────────────────────-┐
+               │  <prefix>-mft-users                                              │
+               ├─────────────────────────────────────────────────────────────────-┤
+               │ PK  username          String                                     │
+               │     carrierId         String   ──► carriers.carrierId            │
+               │     partnerId         String   ──► partners.partnerId            │
+               │     transferTypeId    String   ──► transfer_types.transferTypeId │
+               │     env               String   (p | np)                          │
+               │     protocol          String   (ftps | sftp | as2)               │
+               │     clientId          String   Entra app ID (FTPS / SFTP+Entra)  │
+               │     publicKey         String   SSH public key (SFTP+key)         │
+               │     as2Id             String   AS2 partner ID (AS2 only)         │
+               │     as2CertArn        String   Transfer cert ARN (AS2 only)      │
+               │     contactEmail      String                                     │
+               │     internalOwner     String                                     │
+               │     status            String   (active | disabled)               │
+               │     createdAt         String                                     │
+               │     updatedAt         String                                     │
+               ├─────────────────────────────────────────────────────────────────-┤
+               │ GSI  carrierId-index    (carrierId)                              │
+               │ GSI  partnerId-index    (partnerId)                              │
+               │ GSI  status-index       (status)                                 │
+               └─────────────────────────────────────────────────────────────────-┘
+```
+
+Global tables require DynamoDB streams (`NEW_AND_OLD_IMAGES`) for cross-region replication. A gateway VPC endpoint on private subnet route tables allows the Lambda to reach DynamoDB without traversing a NAT gateway.
 
 ### Lambda source and build
 
@@ -183,9 +242,9 @@ Defined in `terraform/inputs.tf`. Terraflow injects several values from environm
 | `allowed_cidr_blocks` | CIDR blocks permitted inbound on ports 22, 21, 1024-65535, and 443. | **Required** (via env) |
 | `git_repository` | Git repository name for tagging. | Injected by Terraflow |
 | `commit_hash` | Deployment commit hash for tagging. | Injected by Terraflow |
-| `sample_ftps_entra_client_id` | Entra client ID for sample FTPS user (`sample-transfer-1`). Seeds DynamoDB. | `""` |
-| `sample_sftp_entra_client_id` | Entra client ID for sample SFTP+Entra user (`sample-transfer-3`). Seeds DynamoDB. | `""` |
-| `sample_sftp_ssh_public_key` | SSH public key for sample SFTP+SSH user (`sample-transfer-2`). Seeds DynamoDB. | `""` |
+| `sample_ftps_entra_client_id` | Entra client ID for sample FTPS user (`sample-ftps-test`). Seeds DynamoDB. | `""` |
+| `sample_sftp_entra_client_id` | Entra client ID for sample SFTP+Entra user (`sample-sftp-entra-test`). Seeds DynamoDB. | `""` |
+| `sample_sftp_ssh_public_key` | SSH public key for sample SFTP+SSH user (`sample-sftp-test`). Seeds DynamoDB. | `""` |
 
 ## Usage
 
@@ -254,9 +313,9 @@ Sample usernames (all use env `np` — non-production S3 prefix):
 
 | Username | Protocol | Auth |
 |---|---|---|
-| `sample-carrier.sample-partner.sample-transfer-1.np` | FTPS | Entra ID |
-| `sample-carrier.sample-partner.sample-transfer-2.np` | SFTP | SSH public key |
-| `sample-carrier.sample-partner.sample-transfer-3.np` | SFTP | Entra ID |
+| `sample-ftps-test` | FTPS | Entra ID |
+| `sample-sftp-test` | SFTP | SSH public key |
+| `sample-sftp-entra-test` | SFTP | Entra ID |
 
 ```bash
 export AWS_REGION=us-east-1
@@ -292,7 +351,7 @@ Sample-only resources (DynamoDB seed items and sample session IAM roles) live in
 ## Security Notes
 
 - **Inbound exposure** — The Transfer Family security group permits inbound on ports **22 (SFTP)**, **21 + 1024-65535 (FTPS control + passive data)**, and **443 (AS2 over HTTPS)** from `var.allowed_cidr_blocks`. The default of `0.0.0.0/0` is sandbox-only; restrict to partner CIDRs in production.
-- **Authentication** — SFTP/FTPS sessions require a valid DynamoDB user record in `active` status plus successful credential validation. Entra paths require both a valid token and a matching JWT `roles` claim. SSH paths require a stored public key match. Entra client secrets are supplied at connect time and are not stored in AWS.
+- **Authentication** — SFTP/FTPS sessions require a valid DynamoDB user record in `active` status plus successful credential validation. Entra paths require both a valid token and a matching JWT `roles` claim. SFTP+SSH paths return `PublicKeys` from DynamoDB; Transfer Family performs cryptographic key verification. Entra client secrets are supplied at connect time and are not stored in AWS.
 - **S3 hardening** — All S3 buckets enforce `block_public_acls`, `block_public_policy`, `ignore_public_acls`, and `restrict_public_buckets`. Versioning is enabled and non-current versions expire after 90 days.
 - **Encryption** — All objects are encrypted with **SSE-KMS** using customer-managed multi-region CMKs. The default key (`alias/<prefix>-mft-default`) encrypts the primary bucket. **Key rotation is enabled** on every CMK.
 - **IAM** — Least-privilege roles: `<prefix>-mft-s3-access` (Transfer Family → S3 + KMS), `<prefix>-mft-logging` (Transfer Family → CloudWatch Logs), `<prefix>-mft-replication` (S3 CRR with KMS access on both keys), auth Lambda execution role (`dynamodb:GetItem`, Secrets Manager read, CloudWatch Logs), and per-partner session roles scoped to a single S3 prefix.

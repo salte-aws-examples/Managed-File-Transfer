@@ -49,19 +49,19 @@ variable "public_hosted_zone_name" {
 }
 
 variable "sample_ftps_entra_client_id" {
-  description = "Entra ID app registration client ID for the sample FTPS transfer (sample-carrier.sample-partner.sample-transfer-1.np). Used to seed the DynamoDB users table for testing."
+  description = "Entra ID app registration client ID for the sample FTPS transfer (sample-ftps-test). Used to seed the DynamoDB users table for testing."
   type        = string
   default     = ""
 }
 
 variable "sample_sftp_entra_client_id" {
-  description = "Entra ID app registration client ID for the sample SFTP + Entra transfer (sample-carrier.sample-partner.sample-transfer-3.np). Used to seed the DynamoDB users table for testing."
+  description = "Entra ID app registration client ID for the sample SFTP + Entra transfer (sample-sftp-entra-test). Used to seed the DynamoDB users table for testing."
   type        = string
   default     = ""
 }
 
 variable "sample_sftp_ssh_public_key" {
-  description = "SSH public key for the sample SFTP + SSH key transfer (sample-carrier.sample-partner.sample-transfer-2.np). Used to seed the DynamoDB users table for testing. Optional — leave empty to create the record without a key."
+  description = "SSH public key for the sample SFTP + SSH key transfer (sample-sftp-test). Used to seed the DynamoDB users table for testing. Optional — leave empty to create the record without a key."
   type        = string
   default     = ""
 }

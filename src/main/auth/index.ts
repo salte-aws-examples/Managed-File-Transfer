@@ -26,6 +26,7 @@ type TransferAuthResponse =
       Role: string;
       HomeDirectoryType: "LOGICAL";
       HomeDirectoryDetails: string;
+      PublicKeys?: string[];
     };
 
 async function authenticateWithEntra(
@@ -115,9 +116,7 @@ export const handler = async (
   event: TransferAuthEvent,
   context: LambdaContext,
 ): Promise<TransferAuthResponse> => {
-  console.log("Full event:", JSON.stringify(event));
-
-  const { username, password, publicKey } = event ?? {};
+  const { username, password } = event ?? {};
 
   try {
     if (!username) {
@@ -162,26 +161,10 @@ export const handler = async (
     const roleArn = `arn:aws:iam::${accountId}:role/mft-${carrierId}.${partnerId}.${transferId}.${env}`;
     const homeDirectory = `/${bucket}/${s3Folder}/${carrierId}/${partnerId}/${transferId}`;
 
-    // User existence check — Transfer Family invokes the Lambda with no
-    // credentials before the actual credential challenge for SFTP connections.
-    // Return a minimal valid session response to confirm the user exists.
-    if (!publicKey && !password) {
-      console.log(
-        `User existence check for ${username} — returning session stub`,
-      );
-      return {
-        Role: roleArn,
-        HomeDirectoryType: "LOGICAL",
-        HomeDirectoryDetails: JSON.stringify([
-          { Entry: "/", Target: homeDirectory },
-        ]),
-      };
-    }
-
     // 2. Branch on protocol and credential type:
-    //    ftps              → always Entra ID
-    //    sftp + publicKey  → SSH key auth
-    //    sftp + no key     → Entra ID
+    //    ftps              → Entra ID (password required)
+    //    sftp + publicKey  → return PublicKeys from DynamoDB; Transfer Family validates the key
+    //    sftp + no key     → Entra ID (password required)
     if (protocol === "ftps" || (protocol === "sftp" && !storedKey)) {
       if (!password) {
         console.error(`Missing password for ${username}`);
@@ -208,28 +191,24 @@ export const handler = async (
       }
 
       console.log(`${protocol.toUpperCase()} Entra authenticated: ${username}`);
-    } else if (protocol === "sftp" && storedKey) {
-      if (!publicKey) {
-        console.error(
-          `Expected SSH key auth for ${username} but no public key in event`,
-        );
-        return {};
-      }
-      if (publicKey.trim() !== storedKey.trim()) {
-        console.error(`Public key mismatch for ${username}`);
-        return {};
-      }
-      console.log(`SFTP SSH key authenticated: ${username}`);
-    } else {
+    } else if (protocol !== "sftp") {
       console.error(`Unsupported protocol: ${protocol}`);
       return {};
     }
 
-    return {
+    const response: TransferAuthResponse = {
       Role: roleArn,
       HomeDirectoryType: "LOGICAL",
-      HomeDirectoryDetails: JSON.stringify([{ Entry: "/", Target: homeDirectory }]),
+      HomeDirectoryDetails: JSON.stringify([
+        { Entry: "/", Target: homeDirectory },
+      ]),
     };
+
+    if (storedKey) {
+      return { ...response, PublicKeys: [storedKey] };
+    }
+
+    return response;
   } catch (err) {
     console.error("Auth Lambda error:", err);
     return {};
