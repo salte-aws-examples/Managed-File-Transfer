@@ -28,11 +28,15 @@ resource "aws_lambda_function" "auth" {
   }
 
   environment {
-    variables = {
-      ENTRA_CONFIG_SECRET = local.entra_config_secret
-      S3_BUCKET_NAME      = local.source_bucket_name
-      USERS_TABLE         = "${var.prefix}-mft-users"
-    }
+    variables = merge(
+      {
+        ENTRA_CONFIG_SECRET = local.entra_config_secret
+        S3_BUCKET_NAME      = local.source_bucket_name
+        USERS_TABLE         = "${var.prefix}-mft-users"
+        PARTNERS_TABLE      = "${var.prefix}-mft-partners"
+      },
+      var.auth_verbose_logging ? { VERBOSE_LOGGING = "true" } : {},
+    )
   }
 
   tags = merge(local.common_tags, { Name = "${var.prefix}-mft-auth" })

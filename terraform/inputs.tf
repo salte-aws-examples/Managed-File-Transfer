@@ -65,3 +65,9 @@ variable "sample_sftp_ssh_public_key" {
   type        = string
   default     = ""
 }
+
+variable "auth_verbose_logging" {
+  description = "When true, sets VERBOSE_LOGGING=true on the auth Lambda to log all authentication requests (excluding passwords)."
+  type        = bool
+  default     = false
+}

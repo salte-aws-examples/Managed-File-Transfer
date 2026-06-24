@@ -684,8 +684,14 @@ The Lambda is the authentication integration point between Transfer Family, Dyna
 **Universal rules — applied first regardless of protocol:**
 1. Username must exist in DynamoDB — deny if not found
 2. Record `status` must be `active` — deny if disabled
-3. No further processing if either check fails
-4. Derive `roleArn` and `homeDirectory` from DynamoDB record fields before credential routing
+3. Partner record is loaded by `partnerId` from the user record
+4. Source IP is validated against allowed CIDRs **before** any Entra or credential check — deny if restricted and `sourceIp` is missing or does not match
+5. No further processing if any check fails
+6. Derive `roleArn` and `homeDirectory` from DynamoDB record fields before credential routing
+
+**Source IP allowlists** — `allowedSourceCidrs` on the `partners` table defines the default allowlist for all transfers under that partner. The same attribute on a `users` record optionally overrides the partner default when present with a valid non-empty JSON array (e.g. `["203.0.113.0/24"]`). An empty array or invalid value falls back to the partner list. When neither record defines CIDRs, no IP restriction is applied. `0.0.0.0/0` in the allowlist permits any source IP. Transfer Family supplies `event.sourceIp` on every Lambda auth invocation.
+
+**Verbose logging** — when the Lambda environment variable `VERBOSE_LOGGING` is `true`, `1`, or `yes`, every auth request is logged (username, protocol, `serverId`, `sourceIp`, `hasPassword`). Passwords are never logged. When unset, only errors are logged. Terraform exposes this via `var.auth_verbose_logging`.
 
 **Authentication routing logic:**
 
@@ -1210,6 +1216,7 @@ resource "aws_dynamodb_table" "users" {
 | `partnerId` | String (PK) | Lower kebab e.g. `workday` |
 | `name` | String | Title Case display name e.g. `Workday` |
 | `status` | String | `active` or `inactive` |
+| `allowedSourceCidrs` | String | JSON array of CIDR blocks e.g. `["203.0.113.0/24"]`; `["0.0.0.0/0"]` allows any source IP |
 | `createdAt` | String | ISO timestamp |
 | `updatedAt` | String | ISO timestamp |
 
@@ -1235,6 +1242,7 @@ resource "aws_dynamodb_table" "users" {
 | `protocol` | String | `ftps`, `sftp`, or `as2` |
 | `clientId` | String | Entra app registration client ID (FTPS and SFTP+Entra) |
 | `publicKey` | String | SSH public key (SFTP only) |
+| `allowedSourceCidrs` | String | Optional JSON CIDR array overriding partner defaults |
 | `as2Id` | String | Partner AS2 ID (AS2 only) |
 | `as2CertArn` | String | Transfer Family imported certificate ARN (AS2 only) |
 | `contactEmail` | String | Partner contact for credential delivery and rotation notifications |

@@ -29,11 +29,12 @@ resource "aws_dynamodb_table_item" "sample_partner" {
   hash_key   = "partnerId"
 
   item = jsonencode({
-    partnerId = { S = "sample-partner" }
-    name      = { S = "Sample Partner" }
-    status    = { S = "active" }
-    createdAt = { S = local.sample_timestamp }
-    updatedAt = { S = local.sample_timestamp }
+    partnerId           = { S = "sample-partner" }
+    name                = { S = "Sample Partner" }
+    status              = { S = "active" }
+    allowedSourceCidrs  = { S = jsonencode(["0.0.0.0/0"]) }
+    createdAt           = { S = local.sample_timestamp }
+    updatedAt           = { S = local.sample_timestamp }
   })
 }
 

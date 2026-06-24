@@ -94,12 +94,18 @@ A structured convention such as `<carrierId>.<partnerId>.<transferTypeId>.<env>`
 
 ### Auth flow
 
-On every SFTP/FTPS connect, Transfer Family invokes the auth Lambda with `{ username, password? }`. The Lambda does not read `event.publicKey` — SSH key authentication is delegated to Transfer Family via the `PublicKeys` response field.
+On every SFTP/FTPS connect, Transfer Family invokes the auth Lambda with `{ username, password?, protocol, serverId, sourceIp }`. The Lambda does not read `event.publicKey` — SSH key authentication is delegated to Transfer Family via the `PublicKeys` response field.
 
 1. **Looks up** `username` in DynamoDB (`USERS_TABLE`). Deny (`{}`) if not found.
-2. **Checks status** — deny if `status !== "active"`. This is the first denial gate after lookup, before any credential validation.
-3. **Derives session** — `roleArn` and `homeDirectory` from DynamoDB record fields (`carrierId`, `partnerId`, `transferTypeId`, `env`).
-4. **Routes by protocol and stored credentials:**
+2. **Checks status** — deny if `status !== "active"`.
+3. **Looks up partner** — fetch the `partners` record by `partnerId` from the user record.
+4. **Validates source IP** (before any Entra or credential check):
+   - Resolve allowed CIDRs: use the user record's `allowedSourceCidrs` when present and non-empty; otherwise use the partner record's `allowedSourceCidrs`.
+   - If neither record defines CIDRs, no IP restriction is applied.
+   - If the allowlist includes `0.0.0.0/0`, any source IP is permitted.
+   - Otherwise `sourceIp` from the event must match at least one CIDR; deny if missing or no match.
+5. **Derives session** — `roleArn` and `homeDirectory` from DynamoDB record fields (`carrierId`, `partnerId`, `transferTypeId`, `env`).
+6. **Routes by protocol and stored credentials:**
 
 | Protocol | `publicKey` in DynamoDB | Lambda behavior |
 |---|---|---|
@@ -107,7 +113,7 @@ On every SFTP/FTPS connect, Transfer Family invokes the auth Lambda with `{ user
 | `sftp` | yes | No password required; returns session + `PublicKeys: [storedKey]`; Transfer Family validates the client key |
 | `sftp` | no | Requires `password`; validates via Entra ID + JWT `roles` claim |
 
-5. **Entra paths** — fetch Lambda app config from Secrets Manager (`ENTRA_CONFIG_SECRET`), request a token using the **partner's** `clientId` from the DynamoDB record (not the username), validate JWT audience, then validate the JWT `roles[0]` claim matches the DynamoDB record exactly:
+7. **Entra paths** — fetch Lambda app config from Secrets Manager (`ENTRA_CONFIG_SECRET`), request a token using the **partner's** `clientId` from the DynamoDB record (not the username), validate JWT audience, then validate the JWT `roles[0]` claim matches the DynamoDB record exactly:
 
    ```
    mft-<carrierId>.<partnerId>.<transferTypeId>.<env>
@@ -115,7 +121,7 @@ On every SFTP/FTPS connect, Transfer Family invokes the auth Lambda with `{ user
 
    Neither Entra nor DynamoDB alone is sufficient — both must agree.
 
-6. **On success** — return a Transfer Family authorization response:
+8. **On success** — return a Transfer Family authorization response:
 
    ```json
    {
@@ -128,9 +134,25 @@ On every SFTP/FTPS connect, Transfer Family invokes the auth Lambda with `{ user
 
    `PublicKeys` is included only for SFTP users with a stored public key in DynamoDB. `production` maps to `env = p` and `non-production` maps to `env = np`.
 
+### Source IP allowlists
+
+Partner-level CIDRs are stored on the `partners` table as `allowedSourceCidrs` — a JSON string array, e.g. `["203.0.113.0/24","198.51.100.0/24"]`. An optional per-transfer override on the `users` record uses the same attribute name and format. When the user attribute is present with a valid non-empty array, it replaces the partner default; an empty `[]` or invalid value falls back to the partner list.
+
+| Value | Effect |
+|---|---|
+| Attribute absent on both records | No IP restriction |
+| `["0.0.0.0/0"]` | Allow from anywhere |
+| Specific CIDRs | `sourceIp` from Transfer Family must match |
+
+This is independent of `var.allowed_cidr_blocks` on the Transfer Family security group, which remains a network perimeter control.
+
+### Verbose logging
+
+Set Terraform variable `auth_verbose_logging = true` (or `VERBOSE_LOGGING=true` on the Lambda directly) to log every authentication request at `INFO` level, including username, protocol, `serverId`, `sourceIp`, and whether a password was supplied. Passwords are never logged. When unset or `false`, only errors are written to CloudWatch Logs.
+
 ### DynamoDB schema
 
-Four global tables (replicated to the DR region) store partner routing configuration. The auth Lambda reads only the `users` table at connect time; lookup tables support onboarding and reporting.
+Four global tables (replicated to the DR region) store partner routing configuration. The auth Lambda reads the `users` and `partners` tables at connect time; other lookup tables support onboarding and reporting.
 
 ```
 ┌─────────────────────────────┐       ┌─────────────────────────────┐
@@ -139,8 +161,9 @@ Four global tables (replicated to the DR region) store partner routing configura
 │ PK  carrierId      String   │       │ PK  partnerId      String   │
 │     name           String   │       │     name           String   │
 │     status         String   │       │     status         String   │
-│     createdAt      String   │       │     createdAt      String   │
-│     updatedAt      String   │       │     updatedAt      String   │
+│     createdAt      String   │       │     allowedSourceCidrs String (JSON array) │
+│     updatedAt      String   │       │     createdAt      String   │
+│                               │       │     updatedAt      String   │
 └──────────────┬──────────────┘       └──────────────┬──────────────┘
                │                                      │
                │         ┌────────────────────────────┼────────────────────────────┐
@@ -169,8 +192,9 @@ Four global tables (replicated to the DR region) store partner routing configura
                │     env               String   (p | np)                          │
                │     protocol          String   (ftps | sftp | as2)               │
                │     clientId          String   Entra app ID (FTPS / SFTP+Entra)  │
-               │     publicKey         String   SSH public key (SFTP+key)         │
-               │     as2Id             String   AS2 partner ID (AS2 only)         │
+│     publicKey         String   SSH public key (SFTP+key)         │
+│     allowedSourceCidrs String   Optional CIDR override (JSON)   │
+│     as2Id             String   AS2 partner ID (AS2 only)         │
                │     as2CertArn        String   Transfer cert ARN (AS2 only)      │
                │     contactEmail      String                                     │
                │     internalOwner     String                                     │
@@ -190,8 +214,8 @@ Global tables require DynamoDB streams (`NEW_AND_OLD_IMAGES`) for cross-region r
 
 | Artifact | Path |
 |---|---|
-| Source | `src/main/auth/index.ts` |
-| Tests | `src/test/auth/index.test.ts` |
+| Source | `src/main/auth/index.ts` (with `logger.ts`, `sourceIp.ts`) |
+| Tests | `src/test/auth/index.test.ts`, `src/test/auth/sourceIp.test.ts` |
 | Build output | `.build/lambda/auth/index.js` |
 | Deploy zip | `.build/lambda/auth.zip` |
 
@@ -350,10 +374,10 @@ Sample-only resources (DynamoDB seed items and sample session IAM roles) live in
 
 ## Security Notes
 
-- **Inbound exposure** — The Transfer Family security group permits inbound on ports **22 (SFTP)**, **21 + 1024-65535 (FTPS control + passive data)**, and **443 (AS2 over HTTPS)** from `var.allowed_cidr_blocks`. The default of `0.0.0.0/0` is sandbox-only; restrict to partner CIDRs in production.
-- **Authentication** — SFTP/FTPS sessions require a valid DynamoDB user record in `active` status plus successful credential validation. Entra paths require both a valid token and a matching JWT `roles` claim. SFTP+SSH paths return `PublicKeys` from DynamoDB; Transfer Family performs cryptographic key verification. Entra client secrets are supplied at connect time and are not stored in AWS.
+- **Inbound exposure** — The Transfer Family security group permits inbound on ports **22 (SFTP)**, **21 + 1024-65535 (FTPS control + passive data)**, and **443 (AS2 over HTTPS)** from `var.allowed_cidr_blocks`. The default of `0.0.0.0/0` is sandbox-only; restrict to partner CIDRs in production. Per-partner and per-transfer `allowedSourceCidrs` in DynamoDB provide an additional auth-layer IP check inside the Lambda.
+- **Authentication** — SFTP/FTPS sessions require a valid DynamoDB user record in `active` status, a matching source IP when CIDRs are configured, plus successful credential validation. Entra paths require both a valid token and a matching JWT `roles` claim. SFTP+SSH paths return `PublicKeys` from DynamoDB; Transfer Family performs cryptographic key verification. Entra client secrets are supplied at connect time and are not stored in AWS.
 - **S3 hardening** — All S3 buckets enforce `block_public_acls`, `block_public_policy`, `ignore_public_acls`, and `restrict_public_buckets`. Versioning is enabled and non-current versions expire after 90 days.
 - **Encryption** — All objects are encrypted with **SSE-KMS** using customer-managed multi-region CMKs. The default key (`alias/<prefix>-mft-default`) encrypts the primary bucket. **Key rotation is enabled** on every CMK.
 - **IAM** — Least-privilege roles: `<prefix>-mft-s3-access` (Transfer Family → S3 + KMS), `<prefix>-mft-logging` (Transfer Family → CloudWatch Logs), `<prefix>-mft-replication` (S3 CRR with KMS access on both keys), auth Lambda execution role (`dynamodb:GetItem`, Secrets Manager read, CloudWatch Logs), and per-partner session roles scoped to a single S3 prefix.
-- **Logging** — Transfer Family writes session and protocol logs to CloudWatch Logs via the logging role. The auth Lambda logs to `/aws/lambda/<prefix>-mft-auth` with 90-day retention.
+- **Logging** — Transfer Family writes session and protocol logs to CloudWatch Logs via the logging role. The auth Lambda logs to `/aws/lambda/<prefix>-mft-auth` with 90-day retention. Set `auth_verbose_logging` (Terraform) or `VERBOSE_LOGGING=true` (Lambda env) to log all auth requests; otherwise only errors are logged.
 - **AS2 authentication** — AS2 does **not** use the Transfer Family identity provider. Trading partner agreements, certificates, and connectors are configured per partner during onboarding, outside this module's scope.

@@ -44,7 +44,10 @@ resource "aws_iam_role_policy" "lambda_exec" {
       {
         Effect   = "Allow"
         Action   = ["dynamodb:GetItem"]
-        Resource = "arn:aws:dynamodb:${local.active_region}:${data.aws_caller_identity.active.account_id}:table/${var.prefix}-mft-users"
+        Resource = [
+          "arn:aws:dynamodb:${local.active_region}:${data.aws_caller_identity.active.account_id}:table/${var.prefix}-mft-users",
+          "arn:aws:dynamodb:${local.active_region}:${data.aws_caller_identity.active.account_id}:table/${var.prefix}-mft-partners",
+        ]
       }
     ]
   })
