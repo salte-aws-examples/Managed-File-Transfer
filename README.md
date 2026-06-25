@@ -155,16 +155,16 @@ Set Terraform variable `auth_verbose_logging = true` (or `VERBOSE_LOGGING=true` 
 Four global tables (replicated to the DR region) store partner routing configuration. The auth Lambda reads the `users` and `partners` tables at connect time; other lookup tables support onboarding and reporting.
 
 ```
-┌─────────────────────────────┐       ┌─────────────────────────────┐
-│  <prefix>-mft-carriers      │       │  <prefix>-mft-partners      │
-├─────────────────────────────┤       ├─────────────────────────────┤
-│ PK  carrierId      String   │       │ PK  partnerId      String   │
-│     name           String   │       │     name           String   │
-│     status         String   │       │     status         String   │
+┌─────────────────────────────┐       ┌────────────────────────────────────────────┐
+│  <prefix>-mft-carriers      │       │  <prefix>-mft-partners                     │
+├─────────────────────────────┤       ├────────────────────────────────────────────┤
+│ PK  carrierId      String   │       │ PK  partnerId          String              │
+│     name           String   │       │     name               String              │
+│     status         String   │       │     status             String              │
 │     createdAt      String   │       │     allowedSourceCidrs String (JSON array) │
-│     updatedAt      String   │       │     createdAt      String   │
-│                               │       │     updatedAt      String   │
-└──────────────┬──────────────┘       └──────────────┬──────────────┘
+│     updatedAt      String   │       │     createdAt          String              │
+│                             │       │     updatedAt          String              │
+└──────────────┬──────────────┘       └───────────────┬────────────────────────────┘
                │                                      │
                │         ┌────────────────────────────┼────────────────────────────┐
                │         │                            │                            │
@@ -192,9 +192,9 @@ Four global tables (replicated to the DR region) store partner routing configura
                │     env               String   (p | np)                          │
                │     protocol          String   (ftps | sftp | as2)               │
                │     clientId          String   Entra app ID (FTPS / SFTP+Entra)  │
-│     publicKey         String   SSH public key (SFTP+key)         │
-│     allowedSourceCidrs String   Optional CIDR override (JSON)   │
-│     as2Id             String   AS2 partner ID (AS2 only)         │
+               │     publicKey         String   SSH public key (SFTP+key)         │
+               │     allowedSourceCidrs String  Optional CIDR override (JSON)     │
+               │     as2Id             String   AS2 partner ID (AS2 only)         │
                │     as2CertArn        String   Transfer cert ARN (AS2 only)      │
                │     contactEmail      String                                     │
                │     internalOwner     String                                     │
