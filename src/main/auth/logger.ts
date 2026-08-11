@@ -1,6 +1,6 @@
 export function isVerboseLogging(): boolean {
   const value = process.env.VERBOSE_LOGGING?.trim().toLowerCase();
-  return value === "true" || value === "1" || value === "yes";
+  return value === 'true' || value === '1' || value === 'yes';
 }
 
 export function logVerbose(message: string, details?: Record<string, unknown>): void {

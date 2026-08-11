@@ -29,10 +29,10 @@
       "tool": "cursor"
     },
     "README.md": {
-      "lines_total": 359,
-      "lines_ai_generated": 359,
-      "ai_percentage": 100,
-      "last_updated": "2026-05-28T23:30:00Z",
+      "lines_total": 385,
+      "lines_ai_generated": 385,
+      "ai_percentage": 100.0,
+      "last_updated": "2026-08-11T00:18:39Z",
       "tool": "cursor"
     },
     ".cursor/rules/terraform.mdc": {
@@ -64,38 +64,38 @@
       "tool": "cursor"
     },
     "terraform/inputs.tf": {
-      "lines_total": 67,
-      "lines_ai_generated": 67,
-      "ai_percentage": 100,
-      "last_updated": "2026-05-28T20:00:00Z",
+      "lines_total": 73,
+      "lines_ai_generated": 71,
+      "ai_percentage": 97.3,
+      "last_updated": "2026-08-10T20:03:55Z",
       "tool": "cursor"
     },
     "terraform/locals.tf": {
-      "lines_total": 42,
-      "lines_ai_generated": 42,
-      "ai_percentage": 100,
-      "last_updated": "2026-05-28T16:00:00Z",
+      "lines_total": 56,
+      "lines_ai_generated": 56,
+      "ai_percentage": 100.0,
+      "last_updated": "2026-08-11T00:18:39Z",
       "tool": "cursor"
     },
     "terraform/iam.tf": {
-      "lines_total": 149,
+      "lines_total": 152,
       "lines_ai_generated": 149,
-      "ai_percentage": 100,
-      "last_updated": "2026-05-28T16:00:00Z",
+      "ai_percentage": 98.0,
+      "last_updated": "2026-08-10T20:03:55Z",
       "tool": "cursor"
     },
     "terraform/main.tf": {
-      "lines_total": 380,
-      "lines_ai_generated": 380,
-      "ai_percentage": 100,
-      "last_updated": "2026-05-29T00:15:00Z",
+      "lines_total": 329,
+      "lines_ai_generated": 317,
+      "ai_percentage": 96.4,
+      "last_updated": "2026-08-10T20:03:55Z",
       "tool": "cursor"
     },
     "terraform/sample.tf": {
       "lines_total": 344,
       "lines_ai_generated": 344,
-      "ai_percentage": 100,
-      "last_updated": "2026-05-28T23:00:00Z",
+      "ai_percentage": 100.0,
+      "last_updated": "2026-08-11T00:18:39Z",
       "tool": "cursor"
     },
     "terraform/lambda.tf": {
@@ -106,17 +106,17 @@
       "tool": "cursor"
     },
     "src/main/auth/index.ts": {
-      "lines_total": 216,
-      "lines_ai_generated": 216,
-      "ai_percentage": 100,
-      "last_updated": "2026-05-28T23:30:00Z",
+      "lines_total": 280,
+      "lines_ai_generated": 241,
+      "ai_percentage": 86.1,
+      "last_updated": "2026-08-10T19:27:18Z",
       "tool": "cursor"
     },
     "src/test/auth/index.test.ts": {
-      "lines_total": 348,
-      "lines_ai_generated": 348,
-      "ai_percentage": 100,
-      "last_updated": "2026-05-28T23:30:00Z",
+      "lines_total": 523,
+      "lines_ai_generated": 523,
+      "ai_percentage": 100.0,
+      "last_updated": "2026-08-10T19:27:18Z",
       "tool": "cursor"
     },
     "terraform/data.tf": {
@@ -127,10 +127,10 @@
       "tool": "cursor"
     },
     "SPECIFICATION.md": {
-      "lines_total": 1717,
-      "lines_ai_generated": 1717,
-      "ai_percentage": 100,
-      "last_updated": "2026-05-28T23:30:00Z",
+      "lines_total": 1776,
+      "lines_ai_generated": 1776,
+      "ai_percentage": 100.0,
+      "last_updated": "2026-08-11T00:18:55Z",
       "tool": "cursor"
     },
     "terraform/dns.tf": {
@@ -141,10 +141,10 @@
       "tool": "cursor"
     },
     "terraform/dynamodb.tf": {
-      "lines_total": 135,
-      "lines_ai_generated": 135,
-      "ai_percentage": 100,
-      "last_updated": "2026-05-29T00:15:00Z",
+      "lines_total": 172,
+      "lines_ai_generated": 172,
+      "ai_percentage": 100.0,
+      "last_updated": "2026-08-11T00:18:39Z",
       "tool": "cursor"
     },
     "terraform/outputs.tf": {

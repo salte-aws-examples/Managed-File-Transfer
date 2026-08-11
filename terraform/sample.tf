@@ -3,10 +3,6 @@
 # partner onboarding Terraform modules are built.
 # =============================================================================
 
-locals {
-  sample_timestamp = "2024-01-01T00:00:00Z"
-}
-
 resource "aws_dynamodb_table_item" "sample_carrier" {
   count      = var.dr_mode ? 0 : 1
   provider   = aws.active
@@ -97,7 +93,8 @@ resource "aws_dynamodb_table_item" "sample_user_ftps_simple" {
     carrierId      = { S = "sample-carrier" }
     partnerId      = { S = "sample-partner" }
     transferTypeId = { S = "sample-transfer-1" }
-    env            = { S = "np" }
+    frequencyId    = { S = "daily" }
+    env            = { S = "t" }
     protocol       = { S = "ftps" }
     clientId       = { S = var.sample_ftps_entra_client_id }
     contactEmail   = { S = "sample-partner@example.com" }
@@ -119,7 +116,8 @@ resource "aws_dynamodb_table_item" "sample_user_sftp_ssh_simple" {
     carrierId      = { S = "sample-carrier" }
     partnerId      = { S = "sample-partner" }
     transferTypeId = { S = "sample-transfer-2" }
-    env            = { S = "np" }
+    frequencyId    = { S = "monthly" }
+    env            = { S = "t" }
     protocol       = { S = "sftp" }
     publicKey      = { S = var.sample_sftp_ssh_public_key }
     contactEmail   = { S = "sample-partner@example.com" }
@@ -141,7 +139,8 @@ resource "aws_dynamodb_table_item" "sample_user_sftp_entra_simple" {
     carrierId      = { S = "sample-carrier" }
     partnerId      = { S = "sample-partner" }
     transferTypeId = { S = "sample-transfer-3" }
-    env            = { S = "np" }
+    frequencyId    = { S = "weekly" }
+    env            = { S = "t" }
     protocol       = { S = "sftp" }
     clientId       = { S = var.sample_sftp_entra_client_id }
     contactEmail   = { S = "sample-partner@example.com" }
@@ -155,7 +154,7 @@ resource "aws_dynamodb_table_item" "sample_user_sftp_entra_simple" {
 resource "aws_iam_role" "sample_session_1" {
   count    = var.dr_mode ? 0 : 1
   provider = aws.active
-  name     = "mft-sample-carrier.sample-partner.sample-transfer-1.np"
+  name     = "mft-sample-carrier.sample-partner.sample-transfer-1.t"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -166,13 +165,13 @@ resource "aws_iam_role" "sample_session_1" {
     }]
   })
 
-  tags = merge(local.common_tags, { Name = "mft-sample-carrier.sample-partner.sample-transfer-1.np" })
+  tags = merge(local.common_tags, { Name = "mft-sample-carrier.sample-partner.sample-transfer-1.t" })
 }
 
 resource "aws_iam_role_policy" "sample_session_1" {
   count    = var.dr_mode ? 0 : 1
   provider = aws.active
-  name     = "mft-sample-carrier.sample-partner.sample-transfer-1.np"
+  name     = "mft-sample-carrier.sample-partner.sample-transfer-1.t"
   role     = aws_iam_role.sample_session_1[0].id
 
   policy = jsonencode({
@@ -188,7 +187,7 @@ resource "aws_iam_role_policy" "sample_session_1" {
         Condition = {
           StringLike = {
             "s3:prefix" = [
-              "non-production/sample-carrier/sample-partner/sample-transfer-1/*"
+              "test/sample-carrier/sample-partner/sample-transfer-1/daily/*"
             ]
           }
         }
@@ -203,8 +202,8 @@ resource "aws_iam_role_policy" "sample_session_1" {
           "s3:DeleteObjectVersion"
         ]
         Resource = [
-          "arn:aws:s3:::${local.s3_primary_bucket_name}/non-production/sample-carrier/sample-partner/sample-transfer-1/*",
-          "arn:aws:s3:::${local.s3_dr_bucket_name}/non-production/sample-carrier/sample-partner/sample-transfer-1/*"
+          "arn:aws:s3:::${local.s3_primary_bucket_name}/test/sample-carrier/sample-partner/sample-transfer-1/daily/*",
+          "arn:aws:s3:::${local.s3_dr_bucket_name}/test/sample-carrier/sample-partner/sample-transfer-1/daily/*"
         ]
       },
       {
@@ -219,7 +218,7 @@ resource "aws_iam_role_policy" "sample_session_1" {
 resource "aws_iam_role" "sample_session_2" {
   count    = var.dr_mode ? 0 : 1
   provider = aws.active
-  name     = "mft-sample-carrier.sample-partner.sample-transfer-2.np"
+  name     = "mft-sample-carrier.sample-partner.sample-transfer-2.t"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -230,13 +229,13 @@ resource "aws_iam_role" "sample_session_2" {
     }]
   })
 
-  tags = merge(local.common_tags, { Name = "mft-sample-carrier.sample-partner.sample-transfer-2.np" })
+  tags = merge(local.common_tags, { Name = "mft-sample-carrier.sample-partner.sample-transfer-2.t" })
 }
 
 resource "aws_iam_role_policy" "sample_session_2" {
   count    = var.dr_mode ? 0 : 1
   provider = aws.active
-  name     = "mft-sample-carrier.sample-partner.sample-transfer-2.np"
+  name     = "mft-sample-carrier.sample-partner.sample-transfer-2.t"
   role     = aws_iam_role.sample_session_2[0].id
 
   policy = jsonencode({
@@ -252,7 +251,7 @@ resource "aws_iam_role_policy" "sample_session_2" {
         Condition = {
           StringLike = {
             "s3:prefix" = [
-              "non-production/sample-carrier/sample-partner/sample-transfer-2/*"
+              "test/sample-carrier/sample-partner/sample-transfer-2/monthly/*"
             ]
           }
         }
@@ -267,8 +266,8 @@ resource "aws_iam_role_policy" "sample_session_2" {
           "s3:DeleteObjectVersion"
         ]
         Resource = [
-          "arn:aws:s3:::${local.s3_primary_bucket_name}/non-production/sample-carrier/sample-partner/sample-transfer-2/*",
-          "arn:aws:s3:::${local.s3_dr_bucket_name}/non-production/sample-carrier/sample-partner/sample-transfer-2/*"
+          "arn:aws:s3:::${local.s3_primary_bucket_name}/test/sample-carrier/sample-partner/sample-transfer-2/monthly/*",
+          "arn:aws:s3:::${local.s3_dr_bucket_name}/test/sample-carrier/sample-partner/sample-transfer-2/monthly/*"
         ]
       },
       {
@@ -283,7 +282,7 @@ resource "aws_iam_role_policy" "sample_session_2" {
 resource "aws_iam_role" "sample_session_3" {
   count    = var.dr_mode ? 0 : 1
   provider = aws.active
-  name     = "mft-sample-carrier.sample-partner.sample-transfer-3.np"
+  name     = "mft-sample-carrier.sample-partner.sample-transfer-3.t"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -294,13 +293,13 @@ resource "aws_iam_role" "sample_session_3" {
     }]
   })
 
-  tags = merge(local.common_tags, { Name = "mft-sample-carrier.sample-partner.sample-transfer-3.np" })
+  tags = merge(local.common_tags, { Name = "mft-sample-carrier.sample-partner.sample-transfer-3.t" })
 }
 
 resource "aws_iam_role_policy" "sample_session_3" {
   count    = var.dr_mode ? 0 : 1
   provider = aws.active
-  name     = "mft-sample-carrier.sample-partner.sample-transfer-3.np"
+  name     = "mft-sample-carrier.sample-partner.sample-transfer-3.t"
   role     = aws_iam_role.sample_session_3[0].id
 
   policy = jsonencode({
@@ -316,7 +315,7 @@ resource "aws_iam_role_policy" "sample_session_3" {
         Condition = {
           StringLike = {
             "s3:prefix" = [
-              "non-production/sample-carrier/sample-partner/sample-transfer-3/*"
+              "test/sample-carrier/sample-partner/sample-transfer-3/weekly/*"
             ]
           }
         }
@@ -331,8 +330,8 @@ resource "aws_iam_role_policy" "sample_session_3" {
           "s3:DeleteObjectVersion"
         ]
         Resource = [
-          "arn:aws:s3:::${local.s3_primary_bucket_name}/non-production/sample-carrier/sample-partner/sample-transfer-3/*",
-          "arn:aws:s3:::${local.s3_dr_bucket_name}/non-production/sample-carrier/sample-partner/sample-transfer-3/*"
+          "arn:aws:s3:::${local.s3_primary_bucket_name}/test/sample-carrier/sample-partner/sample-transfer-3/weekly/*",
+          "arn:aws:s3:::${local.s3_dr_bucket_name}/test/sample-carrier/sample-partner/sample-transfer-3/weekly/*"
         ]
       },
       {

@@ -1,18 +1,7 @@
-import {
-  AttributeValue,
-  DynamoDBClient,
-  GetItemCommand,
-} from "@aws-sdk/client-dynamodb";
-import {
-  GetSecretValueCommand,
-  SecretsManagerClient,
-} from "@aws-sdk/client-secrets-manager";
-import { logError, logVerbose } from "./logger";
-import {
-  allowsAllSourceIps,
-  resolveAllowedSourceCidrs,
-  sourceIpMatchesCidrs,
-} from "./sourceIp";
+import { AttributeValue, DynamoDBClient, GetItemCommand } from '@aws-sdk/client-dynamodb';
+import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
+import { logError, logVerbose } from './logger';
+import { allowsAllSourceIps, resolveAllowedSourceCidrs, sourceIpMatchesCidrs } from './sourceIp';
 
 const secrets = new SecretsManagerClient({});
 const dynamo = new DynamoDBClient({});
@@ -31,10 +20,10 @@ type LambdaContext = {
 };
 
 type TransferAuthResponse =
-  | {}
+  | Record<string, never>
   | {
       Role: string;
-      HomeDirectoryType: "LOGICAL";
+      HomeDirectoryType: 'LOGICAL';
       HomeDirectoryDetails: string;
       PublicKeys?: string[];
     };
@@ -43,13 +32,13 @@ function validateSourceIp(
   username: string,
   sourceIp: string | undefined,
   userItem: Record<string, AttributeValue>,
-  partnerItem: Record<string, AttributeValue> | undefined,
+  partnerItem: Record<string, AttributeValue> | undefined
 ): boolean {
   const userOverridePresent = userItem.allowedSourceCidrs !== undefined;
   const allowedCidrs = resolveAllowedSourceCidrs(
     userItem.allowedSourceCidrs?.S,
     partnerItem?.allowedSourceCidrs?.S,
-    userOverridePresent,
+    userOverridePresent
   );
 
   if (!allowedCidrs) {
@@ -57,7 +46,7 @@ function validateSourceIp(
   }
 
   if (allowsAllSourceIps(allowedCidrs)) {
-    logVerbose("Source IP unrestricted (0.0.0.0/0)", { username, sourceIp });
+    logVerbose('Source IP unrestricted (0.0.0.0/0)', { username, sourceIp });
     return true;
   }
 
@@ -71,7 +60,7 @@ function validateSourceIp(
     return false;
   }
 
-  logVerbose("Source IP allowed", { username, sourceIp });
+  logVerbose('Source IP allowed', { username, sourceIp });
   return true;
 }
 
@@ -82,20 +71,18 @@ async function authenticateWithEntra(
   carrierId: string,
   partnerId: string,
   transferId: string,
-  env: string,
+  env: string
 ): Promise<boolean> {
   const secretResponse = await secrets.send(
-    new GetSecretValueCommand({ SecretId: process.env.ENTRA_CONFIG_SECRET }),
+    new GetSecretValueCommand({ SecretId: process.env.ENTRA_CONFIG_SECRET })
   );
-  const { entra_tenant_id, entra_client_id } = JSON.parse(
-    secretResponse.SecretString ?? "{}",
-  ) as {
+  const { entra_tenant_id, entra_client_id } = JSON.parse(secretResponse.SecretString ?? '{}') as {
     entra_tenant_id?: string;
     entra_client_id?: string;
   };
 
   if (!entra_tenant_id || !entra_client_id) {
-    logError("Missing entra_tenant_id or entra_client_id in secret");
+    logError('Missing entra_tenant_id or entra_client_id in secret');
     return false;
   }
 
@@ -103,15 +90,15 @@ async function authenticateWithEntra(
   const tokenUrl = `https://login.microsoftonline.com/${entra_tenant_id}/oauth2/v2.0/token`;
 
   const body = new URLSearchParams({
-    grant_type: "client_credentials",
+    grant_type: 'client_credentials',
     client_id: clientId,
     client_secret: password,
     scope,
   });
 
   const tokenResponse = await fetch(tokenUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: body.toString(),
   });
 
@@ -121,10 +108,11 @@ async function authenticateWithEntra(
   }
 
   const tokenData = (await tokenResponse.json()) as { access_token: string };
-  const [, payloadB64] = tokenData.access_token.split(".");
-  const jwtPayload = JSON.parse(
-    Buffer.from(payloadB64, "base64url").toString(),
-  ) as { aud?: string; roles?: string[] };
+  const [, payloadB64] = tokenData.access_token.split('.');
+  const jwtPayload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString()) as {
+    aud?: string;
+    roles?: string[];
+  };
 
   if (jwtPayload.aud !== `api://${entra_client_id}`) {
     logError(`Invalid token audience: ${jwtPayload.aud}`);
@@ -136,9 +124,8 @@ async function authenticateWithEntra(
     logError(`No roles claim in token for ${username}`);
     return false;
   }
-  const roleWithoutPrefix = roleName.replace(/^mft-/, "");
-  const [roleCarrier, rolePartner, roleTransfer, roleEnv] =
-    roleWithoutPrefix.split(".");
+  const roleWithoutPrefix = roleName.replace(/^mft-/, '');
+  const [roleCarrier, rolePartner, roleTransfer, roleEnv] = roleWithoutPrefix.split('.');
 
   if (
     roleCarrier !== carrierId ||
@@ -155,11 +142,11 @@ async function authenticateWithEntra(
 
 export const handler = async (
   event: TransferAuthEvent,
-  context: LambdaContext,
+  context: LambdaContext
 ): Promise<TransferAuthResponse> => {
   const { username, password, protocol, serverId, sourceIp } = event ?? {};
 
-  logVerbose("Auth request received", {
+  logVerbose('Auth request received', {
     username,
     protocol,
     serverId,
@@ -169,7 +156,7 @@ export const handler = async (
 
   try {
     if (!username) {
-      logError("Missing username");
+      logError('Missing username');
       return {};
     }
 
@@ -177,7 +164,7 @@ export const handler = async (
       new GetItemCommand({
         TableName: process.env.USERS_TABLE,
         Key: { username: { S: username } },
-      }),
+      })
     );
 
     const item = tableResult.Item;
@@ -185,7 +172,7 @@ export const handler = async (
       logError(`Unknown username: ${username}`);
       return {};
     }
-    if (item.status.S !== "active") {
+    if (item.status.S !== 'active') {
       logError(`Disabled username: ${username}`);
       return {};
     }
@@ -194,40 +181,53 @@ export const handler = async (
     const carrierId = item.carrierId.S!;
     const partnerId = item.partnerId.S!;
     const transferId = item.transferTypeId.S!;
+    const frequencyId = item.frequencyId?.S;
     const env = item.env.S!;
     const storedKey = item.publicKey?.S;
+
+    if (!frequencyId) {
+      logError(`Missing frequencyId for ${username}`);
+      return {};
+    }
 
     const partnerResult = await dynamo.send(
       new GetItemCommand({
         TableName: process.env.PARTNERS_TABLE,
         Key: { partnerId: { S: partnerId } },
-      }),
+      })
     );
 
     if (!validateSourceIp(username, sourceIp, item, partnerResult.Item)) {
       return {};
     }
 
-    const accountId = context.invokedFunctionArn.split(":")[4];
+    const accountId = context.invokedFunctionArn.split(':')[4];
     const bucket = process.env.S3_BUCKET_NAME;
 
     if (!bucket) {
-      logError("Missing S3_BUCKET_NAME");
+      logError('Missing S3_BUCKET_NAME');
       return {};
     }
 
-    const s3Folder = env === "p" ? "production" : "non-production";
+    const envFolders: Record<string, string> = {
+      p: 'production',
+      t: 'test',
+    };
+    const s3Folder = envFolders[env];
+    if (!s3Folder) {
+      logError(`Unsupported env for ${username}: ${env}`);
+      return {};
+    }
+
     const roleArn = `arn:aws:iam::${accountId}:role/mft-${carrierId}.${partnerId}.${transferId}.${env}`;
-    const homeDirectory = `/${bucket}/${s3Folder}/${carrierId}/${partnerId}/${transferId}`;
+    const homeDirectory = `/${bucket}/${s3Folder}/${carrierId}/${partnerId}/${transferId}/${frequencyId}`;
 
     if (protocol && protocol.toLowerCase() !== userProtocol.toLowerCase()) {
-      logError(
-        `Protocol mismatch for ${username}: event=${protocol} record=${userProtocol}`,
-      );
+      logError(`Protocol mismatch for ${username}: event=${protocol} record=${userProtocol}`);
       return {};
     }
 
-    if (userProtocol === "ftps" || (userProtocol === "sftp" && !storedKey)) {
+    if (userProtocol === 'ftps' || (userProtocol === 'sftp' && !storedKey)) {
       if (!password) {
         logError(`Missing password for ${username}`);
         return {};
@@ -246,7 +246,7 @@ export const handler = async (
         carrierId,
         partnerId,
         transferId,
-        env,
+        env
       );
       if (!authenticated) {
         return {};
@@ -255,25 +255,23 @@ export const handler = async (
       logVerbose(`${userProtocol.toUpperCase()} Entra authenticated`, {
         username,
       });
-    } else if (userProtocol !== "sftp") {
+    } else if (userProtocol !== 'sftp') {
       logError(`Unsupported protocol: ${userProtocol}`);
       return {};
     }
 
     const response: TransferAuthResponse = {
       Role: roleArn,
-      HomeDirectoryType: "LOGICAL",
-      HomeDirectoryDetails: JSON.stringify([
-        { Entry: "/", Target: homeDirectory },
-      ]),
+      HomeDirectoryType: 'LOGICAL',
+      HomeDirectoryDetails: JSON.stringify([{ Entry: '/', Target: homeDirectory }]),
     };
 
     if (storedKey) {
-      logVerbose("SFTP public key session issued", { username });
+      logVerbose('SFTP public key session issued', { username });
       return { ...response, PublicKeys: [storedKey] };
     }
 
-    logVerbose("Session issued", { username, protocol: userProtocol });
+    logVerbose('Session issued', { username, protocol: userProtocol });
     return response;
   } catch (err) {
     logError(`Auth Lambda error: ${String(err)}`);

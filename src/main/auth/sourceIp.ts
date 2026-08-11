@@ -1,8 +1,6 @@
-export const ALLOW_ALL_CIDR = "0.0.0.0/0";
+export const ALLOW_ALL_CIDR = '0.0.0.0/0';
 
-export function parseAllowedSourceCidrs(
-  raw: string | undefined,
-): string[] | null {
+export function parseAllowedSourceCidrs(raw: string | undefined): string[] | null {
   if (!raw?.trim()) {
     return null;
   }
@@ -12,7 +10,7 @@ export function parseAllowedSourceCidrs(
     if (!Array.isArray(parsed)) {
       return null;
     }
-    const cidrs = parsed.filter((entry): entry is string => typeof entry === "string");
+    const cidrs = parsed.filter((entry): entry is string => typeof entry === 'string');
     return cidrs.length > 0 ? cidrs : null;
   } catch {
     return null;
@@ -24,7 +22,7 @@ export function allowsAllSourceIps(cidrs: string[]): boolean {
 }
 
 function ipv4ToInt(ip: string): number | null {
-  const parts = ip.split(".");
+  const parts = ip.split('.');
   if (parts.length !== 4) {
     return null;
   }
@@ -45,7 +43,7 @@ function ipv4ToInt(ip: string): number | null {
 }
 
 function parseCidr(cidr: string): { network: number; mask: number } | null {
-  const [ipPart, prefixPart] = cidr.split("/");
+  const [ipPart, prefixPart] = cidr.split('/');
   if (!ipPart || prefixPart === undefined) {
     return null;
   }
@@ -60,7 +58,7 @@ function parseCidr(cidr: string): { network: number; mask: number } | null {
     return null;
   }
 
-  const mask = prefix === 0 ? 0 : ((0xffffffff << (32 - prefix)) >>> 0);
+  const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
   return { network: ip & mask, mask };
 }
 
@@ -89,7 +87,7 @@ export function sourceIpMatchesCidrs(sourceIp: string, cidrs: string[]): boolean
 export function resolveAllowedSourceCidrs(
   userCidrsRaw: string | undefined,
   partnerCidrsRaw: string | undefined,
-  userOverridePresent: boolean,
+  userOverridePresent: boolean
 ): string[] | null {
   if (userOverridePresent) {
     const userCidrs = parseAllowedSourceCidrs(userCidrsRaw);
