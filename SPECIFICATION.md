@@ -145,18 +145,22 @@ variable "sample_sftp_ssh_public_key" {
 
 ## Locals (`terraform/locals.tf`)
 
+All `locals` for this module live in this file only.
+
 ```hcl
 locals {
   active_region  = var.dr_mode ? var.dr_region : var.primary_region
   passive_region = var.dr_mode ? var.primary_region : var.dr_region
 
-  # Environment is derived from the Terraform workspace name rather than an input
-  # variable. Accounts are separated by environment in general; side-by-side
-  # development deployments (e.g. formal dev branch vs preview branches) use
-  # the workspace name to namespace resources within the same account.
-  environment = terraform.workspace
+  # Sliced and sorted so EIP count and Transfer Family subnet_ids stay aligned
+  # and the AZ selection is deterministic across applies.
+  public_subnet_ids = slice(sort(data.aws_subnets.public.ids), 0, var.eip_count)
 
-  # S3 bucket names are globally unique by construction — prefix + account ID + region
+  # Private subnets for Lambda + Secrets Manager interface endpoint — same
+  # slice length as eip_count so AZ coverage stays aligned with Transfer Family.
+  private_subnet_ids = slice(sort(data.aws_subnets.private.ids), 0, var.eip_count)
+
+  # All resource names are namespaced under the prefix
   s3_primary_bucket_name = "${var.prefix}-mft-${data.aws_caller_identity.active.account_id}-${data.aws_region.active.name}"
   s3_dr_bucket_name      = "${var.prefix}-mft-${data.aws_caller_identity.active.account_id}-${data.aws_region.passive.name}"
 
@@ -164,41 +168,41 @@ locals {
   source_bucket_name  = var.dr_mode ? local.s3_dr_bucket_name : local.s3_primary_bucket_name
   replica_bucket_name = var.dr_mode ? local.s3_primary_bucket_name : local.s3_dr_bucket_name
 
-  # MFT hostname derived from public hosted zone — no override needed
   mft_hostname = "ftp.${var.public_hosted_zone_name}"
 
-  # Private zone uses the same name as the public zone (split-brain DNS)
   private_hosted_zone_name = var.public_hosted_zone_name
 
-  # VPC and subnets are resolved via data source lookups — not accepted as inputs.
-  # Public subnets are used for Transfer Family and EIPs so they are externally
-  # accessible via EIP. Private subnets are used for the Lambda and Secrets Manager
-  # VPC endpoint. public_subnet_ids is sliced to var.eip_count so EIP count and
-  # subnet count passed to Transfer Family endpoint_details are always in sync.
-  vpc_id              = data.aws_vpc.active.id
-  public_subnet_ids   = slice(sort(data.aws_subnets.public.ids), 0, var.eip_count)
-  private_subnet_ids  = slice(sort(data.aws_subnets.private.ids), 0, var.eip_count)
+  # Resolves to the data source in DR mode, the managed resource in primary mode
+  private_zone_id = var.dr_mode ? data.aws_route53_zone.private[0].zone_id : aws_route53_zone.private[0].zone_id
 
-  # Entra ID configuration secret name — derived from prefix and passed to the
-  # auth Lambda as the ENTRA_CONFIG_SECRET environment variable. The secret
-  # itself is provisioned outside this stack.
-  entra_config_secret = "${var.prefix}/mft/entra"
-
-  common_tags = {
-    Project       = "${var.prefix}-mft-transfer"
-    Environment   = local.environment
-    ManagedBy     = "terraform"
-    Prefix        = var.prefix
-    DR_Mode       = tostring(var.dr_mode)
-    CommitHash    = var.commit_hash
-    GitRepository = var.git_repository
-  }
-}
-
-# KMS key ARN resolution — works in both primary and DR mode
-locals {
+  # Multi-region KMS key ARNs — resolve to the data source in DR mode, the
+  # managed resource (primary or replica) in primary mode. Always region-correct.
   default_key_active_arn  = var.dr_mode ? data.aws_kms_key.default_active[0].arn : aws_kms_key.default[0].arn
   default_key_passive_arn = var.dr_mode ? data.aws_kms_key.default_passive[0].arn : aws_kms_replica_key.default[0].arn
+
+  common_tags = {
+    GitRepository = var.git_repository
+    CommitHash    = var.commit_hash
+    ManagedBy     = "terraform"
+  }
+
+  entra_config_secret = "${var.prefix}/mft/entra"
+
+  vpc_id = data.aws_vpc.this.id
+
+  # Shared seed timestamp for domain/sample DynamoDB items.
+  sample_timestamp         = "2024-01-01T00:00:00Z"
+  frequency_seed_timestamp = "2024-01-01T00:00:00Z"
+
+  # Canonical frequency domain values — retained when sample.tf is removed in Phase 2.
+  frequencies = {
+    daily         = "Daily"
+    weekly        = "Weekly"
+    monthly       = "Monthly"
+    quarterly     = "Quarterly"
+    "semi-annual" = "Semi-annual"
+    annual        = "Annual"
+  }
 }
 ```
 
@@ -248,7 +252,7 @@ The following resources are provisioned in the primary region:
 - **EIPs** — `var.eip_count` Elastic IPs assigned to the Transfer Family server endpoint. Defaults to 2 for Multi-AZ HA.
 - **AWS Transfer Family Server** — Multi-AZ managed server provisioned in **public subnets** with VPC endpoint type, protocols SFTP + FTPS + AS2, `identity_provider_type = "AWS_LAMBDA"`, custom hostname, and ACM certificate attached. Public subnets are required so EIPs are reachable from the internet.
 - **Lambda Auth Broker** — Node.js Lambda function provisioned in **private subnets** with VPC config, invoked directly by Transfer Family for every SFTP and FTPS authentication attempt. Looks up the username in the DynamoDB users table to retrieve routing config (carrier, partner, transfer type, env, protocol, session role). For FTPS validates partner credentials against Entra ID using the OAuth2 client credentials flow with `.default` scope. For SFTP compares the public key from the event against the stored public key. Returns session role ARN and home directory to Transfer Family.
-- **DynamoDB Global Tables** — Four global tables (`carriers`, `partners`, `transfer-types`, `users`) with replicas in both primary and DR regions. The Lambda reads from its local region's replica. The users table is the authoritative source for all partner routing configuration and credentials.
+- **DynamoDB Global Tables** — Five global tables (`carriers`, `partners`, `transfer-types`, `frequencies`, `users`) with replicas in both primary and DR regions. The Lambda reads from its local region's replica. The users table is the authoritative source for all partner routing configuration and credentials.
 - **DynamoDB Gateway VPC Endpoint** — Free gateway endpoint allowing the Lambda to reach DynamoDB without traversing the NAT gateway.
 - **Lambda Security Group** — Allows outbound HTTPS (443) only, for Entra ID token endpoint calls via NAT gateway.
 - **Secrets Manager VPC Endpoint** — Interface endpoint in private subnets with private DNS enabled. Allows Lambda to reach Secrets Manager without traversing the NAT gateway. Dedicated security group allowing inbound 443 from the Lambda security group only.
@@ -256,17 +260,16 @@ The following resources are provisioned in the primary region:
 - **Secrets Manager Secret (Entra Config)** — Referenced as a data source. Holds a JSON object with `entra_tenant_id`, `entra_client_id`, and `entra_client_secret`. Provisioned outside this Terraform stack by a separate secrets management process. The Lambda reads it at runtime; this stack only grants `secretsmanager:GetSecretValue` on its ARN.
 - **CloudWatch Log Group (Lambda)** — Retention 90 days.
 - **VPC Endpoint (S3 Gateway)** — S3 gateway endpoint in the VPC, associated with route tables in the private subnets.
-- **KMS Key (Default)** — Multi-region CMK used as the bucket default encryption key. Primary alias: `alias/<prefix>-sftp-default`. Replica key with same alias in DR region. Primary mode only.
+- **KMS Key (Default)** — Multi-region CMK used as the bucket default encryption key. Primary alias: `alias/<prefix>-mft-default`. Replica key with same alias in DR region. Primary mode only.
 - **KMS Key (Sample Carrier)** — Multi-region CMK for the sample carrier. Primary alias: `alias/<prefix>-mft-sample-carrier`. Replica in DR region. Primary mode only.
-- **S3 Bucket (Primary)** — SFTP backing store with versioning, SSE-KMS using the default KMS key, blocked public access, and server access logging.
-- **S3 Bucket (DR)** — Replica bucket in DR region with versioning, SSE-KMS, and blocked public access.
-- **S3 Replication Configuration** — CRR rule replicating primary → DR.
+- **S3 Bucket (Primary)** — Transfer Family backing store with versioning (required for CRR), SSE-KMS using the default KMS key, and blocked public access. No lifecycle rules (archiving is an external add-on).
+- **S3 Bucket (DR)** — Replica bucket in DR region with versioning, SSE-KMS, and blocked public access. No lifecycle rules.
+- **S3 Replication Configuration** — CRR rule replicating primary → DR (reverses in DR mode).
 - **IAM Role for Replication** — Grants S3 permission to replicate objects between buckets including KMS permissions.
 - **ACM Certificate** — Certificate for `ftp.<public_hosted_zone_name>` in primary region, DNS-validated.
 - **Public Hosted Zone** — Referenced as a data source (must be pre-provisioned).
 - **Private Hosted Zone** — Created in primary mode, associated with the active VPC.
 - **Route 53 Records** — Public zone: A records pointing at EIPs. Private zone: CNAME pointing at `aws_transfer_server.mft.endpoint`. Both use `allow_overwrite = true`.
-- **SSM Parameters** — Publish `transfer_server_id` and `s3_source_bucket` in both primary and DR mode using the active region provider. SSM Parameter Store is regional — provisioning in both regions ensures carrier and partner onboarding Terraform can look up values against whichever region is currently active.
 
 ### DR Mode (`dr_mode = true`)
 
@@ -504,7 +507,7 @@ data "aws_kms_key" "default_passive" {
 
 ### S3 Buckets
 
-Both buckets are provisioned in primary mode only. In DR mode both are referenced as data sources. Encryption uses `local.default_key_active_arn` on the primary bucket and `local.default_key_passive_arn` on the DR bucket. Enable versioning, public access block, and lifecycle rules to expire non-current versions after 90 days on both buckets.
+Both buckets are provisioned in primary mode only. In DR mode both are referenced as data sources. Encryption uses `local.default_key_active_arn` on the primary bucket and `local.default_key_passive_arn` on the DR bucket. Enable versioning and public access block on both buckets. **Do not add lifecycle rules on these MFT buckets** — archiving into a separate archive bucket (with its own lifecycle) is handled by an add-on process outside this repository. Object paths include `frequencyId` from DynamoDB as the final segment after `transferTypeId`.
 
 ```hcl
 resource "aws_s3_bucket" "primary" {
@@ -536,7 +539,7 @@ data "aws_s3_bucket" "replica" {
 
 ### Cross-Region Replication
 
-Multi-region keys share the same key material — no re-encryption occurs during replication. `replica_kms_key_id` references `local.default_key_passive_arn` so it resolves correctly in both primary and DR mode.
+Multi-region keys share the same key material — no re-encryption occurs during replication. `replica_kms_key_id` references `local.default_key_passive_arn` so it resolves correctly in both primary and DR mode. Versioning is required for CRR; lifecycle expiration of noncurrent versions is intentionally omitted.
 
 ```hcl
 resource "aws_s3_bucket_replication_configuration" "mft" {
@@ -635,9 +638,7 @@ data "aws_route53_zone" "private" {
   private_zone = true
 }
 
-locals {
-  private_zone_id = var.dr_mode ? data.aws_route53_zone.private[0].zone_id : aws_route53_zone.private[0].zone_id
-}
+# local.private_zone_id is defined in terraform/locals.tf
 
 resource "aws_route53_vpc_association" "dr" {
   count   = var.dr_mode ? 1 : 0
@@ -684,8 +685,14 @@ The Lambda is the authentication integration point between Transfer Family, Dyna
 **Universal rules — applied first regardless of protocol:**
 1. Username must exist in DynamoDB — deny if not found
 2. Record `status` must be `active` — deny if disabled
-3. No further processing if either check fails
-4. Derive `roleArn` and `homeDirectory` from DynamoDB record fields before credential routing
+3. Partner record is loaded by `partnerId` from the user record
+4. Source IP is validated against allowed CIDRs **before** any Entra or credential check — deny if restricted and `sourceIp` is missing or does not match
+5. No further processing if any check fails
+6. Derive `roleArn` and `homeDirectory` from DynamoDB record fields before credential routing
+
+**Source IP allowlists** — `allowedSourceCidrs` on the `partners` table defines the default allowlist for all transfers under that partner. The same attribute on a `users` record optionally overrides the partner default when present with a valid non-empty JSON array (e.g. `["203.0.113.0/24"]`). An empty array or invalid value falls back to the partner list. When neither record defines CIDRs, no IP restriction is applied. `0.0.0.0/0` in the allowlist permits any source IP. Transfer Family supplies `event.sourceIp` on every Lambda auth invocation.
+
+**Verbose logging** — when the Lambda environment variable `VERBOSE_LOGGING` is `true`, `1`, or `yes`, every auth request is logged (username, protocol, `serverId`, `sourceIp`, `hasPassword`). Passwords are never logged. When unset, only errors are logged. Terraform exposes this via `var.auth_verbose_logging`.
 
 **Authentication routing logic:**
 
@@ -726,8 +733,13 @@ This means a valid Entra token is not sufficient on its own — the role claim m
 **Session role and home directory derivation** — derived from the DynamoDB record fields:
 ```javascript
 const roleArn = `arn:aws:iam::${accountId}:role/mft-${record.carrierId}.${record.partnerId}.${record.transferTypeId}.${record.env}`;
-const s3Folder = record.env === 'p' ? 'production' : 'non-production';
-const homeDirectory = `/${bucket}/${s3Folder}/${record.carrierId}/${record.partnerId}/${record.transferTypeId}`;
+const envFolders = { p: 'production', t: 'test' };
+const s3Folder = envFolders[record.env];
+if (!record.frequencyId || !s3Folder) {
+  // Deny — missing frequencyId or unsupported env
+  return {};
+}
+const homeDirectory = `/${bucket}/${s3Folder}/${record.carrierId}/${record.partnerId}/${record.transferTypeId}/${record.frequencyId}`;
 ```
 
 ### Role Name Convention and Derivation
@@ -741,17 +753,17 @@ Environment values:
 | DynamoDB `env` | S3 folder |
 |---|---|
 | `p` | `production` |
-| `np` | `non-production` |
+| `t` | `test` |
 
-Derived values from DynamoDB record `{carrierId: "acme-mutual", partnerId: "workday", transferTypeId: "personnel", env: "p"}`:
+Derived values from DynamoDB record `{carrierId: "acme-mutual", partnerId: "workday", transferTypeId: "personnel", frequencyId: "monthly", env: "p"}`:
 
 | Value | Result |
 |---|---|
 | IAM role name | `mft-acme-mutual.workday.personnel.p` |
 | IAM role ARN | `arn:aws:iam::<account-id>:role/mft-acme-mutual.workday.personnel.p` |
-| Home directory | `/<bucket>/production/acme-mutual/workday/personnel` |
+| Home directory | `/<bucket>/production/acme-mutual/workday/personnel/monthly` |
 
-The session role is provisioned by the partner onboarding Terraform. Its S3 permissions are scoped to both the production and non-production prefixes for that carrier/partner/transfer-type — environment isolation is enforced by the home directory mapping returned by the Lambda, not by IAM.
+The session role is provisioned by the partner onboarding Terraform. Its S3 permissions are scoped to the carrier/partner/transfer-type/`frequencyId` prefixes under both `production/` and `test/` — environment isolation is enforced by the home directory mapping returned by the Lambda, not by IAM.
 
 **Lambda response shape** — on success the handler returns:
 
@@ -759,7 +771,7 @@ The session role is provisioned by the partner onboarding Terraform. Its S3 perm
 {
   "Role": "arn:aws:iam::<account-id>:role/mft-<carrierId>.<partnerId>.<transferTypeId>.<env>",
   "HomeDirectoryType": "LOGICAL",
-  "HomeDirectoryDetails": "[{\"Entry\":\"/\",\"Target\":\"/<bucket>/<production|non-production>/<carrierId>/<partnerId>/<transferTypeId>\"}]",
+  "HomeDirectoryDetails": "[{\"Entry\":\"/\",\"Target\":\"/<bucket>/<production|test>/<carrierId>/<partnerId>/<transferTypeId>/<frequencyId>\"}]",
   "PublicKeys": ["ssh-rsa AAAA..."]
 }
 ```
@@ -945,17 +957,19 @@ Encryption: the secret uses the AWS-managed key (`aws/secretsmanager`); no `kms:
 │   └── <carrier>/
 │       └── <partner>/
 │           └── <transfer-type>/
-│               ├── inbound/
-│               └── outbound/
-└── non-production/
+│               └── <frequency>/
+│                   ├── inbound/
+│                   └── outbound/
+└── test/
     └── <carrier>/
         └── <partner>/
             └── <transfer-type>/
-                ├── inbound/
-                └── outbound/
+                └── <frequency>/
+                    ├── inbound/
+                    └── outbound/
 ```
 
-The Lambda home directory mapping points to `/<bucket>/<environment>/<carrier>/<partner>/<transfer-type>`. The partner's FTPS/SFTP client lands at this root and navigates to `inbound/` or `outbound/` from there.
+The Lambda home directory mapping points to `/<bucket>/<environment>/<carrier>/<partner>/<transfer-type>/<frequency>`. The partner's FTPS/SFTP client lands at this root and navigates to `inbound/` or `outbound/` from there.
 
 ---
 
@@ -1033,7 +1047,7 @@ Contrast: when `identity_provider_type = "API_GATEWAY"`, Transfer Family **does*
 
 ## DynamoDB Global Tables (`terraform/dynamodb.tf`)
 
-Four DynamoDB global tables are provisioned with replicas in both primary and DR regions. Global tables provide active-active replication — the Lambda in either region reads from its local replica with low latency, and failover requires no configuration change.
+Five DynamoDB global tables are provisioned with replicas in both primary and DR regions. Global tables provide active-active replication — the Lambda in either region reads from its local replica with low latency, and failover requires no configuration change.
 
 All tables use on-demand billing and are provisioned in primary mode only (`count = var.dr_mode ? 0 : 1`). In DR mode they are referenced as data sources — global table replication means the data is already present in the DR region.
 
@@ -1134,6 +1148,47 @@ resource "aws_dynamodb_table" "transfer_types" {
   tags = merge(local.common_tags, { Name = "${var.prefix}-mft-transfer-types" })
 }
 
+# --- Frequencies table ---
+resource "aws_dynamodb_table" "frequencies" {
+  count        = var.dr_mode ? 0 : 1
+  provider     = aws.active
+  name         = "${var.prefix}-mft-frequencies"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "frequencyId"
+
+  stream_enabled   = true
+  stream_view_type = "NEW_AND_OLD_IMAGES"
+
+  attribute {
+    name = "frequencyId"
+    type = "S"
+  }
+
+  replica {
+    region_name = var.dr_region
+  }
+
+  tags = merge(local.common_tags, { Name = "${var.prefix}-mft-frequencies" })
+}
+
+# Frequency domain seed map (`local.frequencies`, `local.frequency_seed_timestamp`)
+# is defined in terraform/locals.tf — not in this file.
+
+resource "aws_dynamodb_table_item" "frequencies" {
+  for_each   = var.dr_mode ? {} : local.frequencies
+  provider   = aws.active
+  table_name = aws_dynamodb_table.frequencies[0].name
+  hash_key   = "frequencyId"
+
+  item = jsonencode({
+    frequencyId = { S = each.key }
+    name        = { S = each.value }
+    status      = { S = "active" }
+    createdAt   = { S = local.frequency_seed_timestamp }
+    updatedAt   = { S = local.frequency_seed_timestamp }
+  })
+}
+
 # --- Users table ---
 resource "aws_dynamodb_table" "users" {
   count        = var.dr_mode ? 0 : 1
@@ -1210,6 +1265,7 @@ resource "aws_dynamodb_table" "users" {
 | `partnerId` | String (PK) | Lower kebab e.g. `workday` |
 | `name` | String | Title Case display name e.g. `Workday` |
 | `status` | String | `active` or `inactive` |
+| `allowedSourceCidrs` | String | JSON array of CIDR blocks e.g. `["203.0.113.0/24"]`; `["0.0.0.0/0"]` allows any source IP |
 | `createdAt` | String | ISO timestamp |
 | `updatedAt` | String | ISO timestamp |
 
@@ -1223,6 +1279,16 @@ resource "aws_dynamodb_table" "users" {
 | `createdAt` | String | ISO timestamp |
 | `updatedAt` | String | ISO timestamp |
 
+**`<prefix>-mft-frequencies`**
+
+| Attribute | Type | Notes |
+|---|---|---|
+| `frequencyId` | String (PK) | Lower kebab: `daily`, `weekly`, `monthly`, `quarterly`, `semi-annual`, `annual` |
+| `name` | String | Display name with first character capitalized e.g. `Daily`, `Semi-annual` |
+| `status` | String | `active` or `inactive` |
+| `createdAt` | String | ISO timestamp |
+| `updatedAt` | String | ISO timestamp |
+
 **`<prefix>-mft-users`**
 
 | Attribute | Type | Notes |
@@ -1231,10 +1297,12 @@ resource "aws_dynamodb_table" "users" {
 | `carrierId` | String (GSI) | FK to carriers table |
 | `partnerId` | String (GSI) | FK to partners table |
 | `transferTypeId` | String | FK to transfer types table |
-| `env` | String | `p` or `np` |
+| `frequencyId` | String | FK to frequencies table |
+| `env` | String | `p` or `t` |
 | `protocol` | String | `ftps`, `sftp`, or `as2` |
 | `clientId` | String | Entra app registration client ID (FTPS and SFTP+Entra) |
 | `publicKey` | String | SSH public key (SFTP only) |
+| `allowedSourceCidrs` | String | Optional JSON CIDR array overriding partner defaults |
 | `as2Id` | String | Partner AS2 ID (AS2 only) |
 | `as2CertArn` | String | Transfer Family imported certificate ARN (AS2 only) |
 | `contactEmail` | String | Partner contact for credential delivery and rotation notifications |
@@ -1251,7 +1319,7 @@ All sample-specific resources are isolated in `terraform/sample.tf`. This file i
 
 `sample.tf` contains:
 - Three sample IAM session roles (`sample_session_1/2/3`) for FTPS and both SFTP auth modes
-- Sample DynamoDB seed data — one carrier, one partner, three transfer types, and three user records with friendly usernames
+- Sample DynamoDB seed data — one carrier, one partner, three transfer types, and three user records with friendly usernames (including `frequencyId`)
 
 Note: there is no sample carrier KMS key. The shared S3 bucket uses the default KMS key for all Transfer Family writes regardless of carrier prefix.
 
@@ -1260,10 +1328,6 @@ Note: there is no sample carrier KMS key. The shared S3 bucket uses the default 
 # SAMPLE RESOURCES — Remove this file entirely in Phase 2 when carrier and
 # partner onboarding Terraform modules are built.
 # =============================================================================
-
-locals {
-  sample_timestamp = "2024-01-01T00:00:00Z"
-}
 
 # --- Sample DynamoDB seed data ---
 
@@ -1358,7 +1422,8 @@ resource "aws_dynamodb_table_item" "sample_user_ftps_simple" {
     carrierId      = { S = "sample-carrier" }
     partnerId      = { S = "sample-partner" }
     transferTypeId = { S = "sample-transfer-1" }
-    env            = { S = "np" }
+    frequencyId    = { S = "daily" }
+    env            = { S = "t" }
     protocol       = { S = "ftps" }
     clientId       = { S = var.sample_ftps_entra_client_id }
     contactEmail   = { S = "sample-partner@example.com" }
@@ -1380,7 +1445,8 @@ resource "aws_dynamodb_table_item" "sample_user_sftp_ssh_simple" {
     carrierId      = { S = "sample-carrier" }
     partnerId      = { S = "sample-partner" }
     transferTypeId = { S = "sample-transfer-2" }
-    env            = { S = "np" }
+    frequencyId    = { S = "monthly" }
+    env            = { S = "t" }
     protocol       = { S = "sftp" }
     publicKey      = { S = var.sample_sftp_ssh_public_key }
     contactEmail   = { S = "sample-partner@example.com" }
@@ -1402,7 +1468,8 @@ resource "aws_dynamodb_table_item" "sample_user_sftp_entra_simple" {
     carrierId      = { S = "sample-carrier" }
     partnerId      = { S = "sample-partner" }
     transferTypeId = { S = "sample-transfer-3" }
-    env            = { S = "np" }
+    frequencyId    = { S = "weekly" }
+    env            = { S = "t" }
     protocol       = { S = "sftp" }
     clientId       = { S = var.sample_sftp_entra_client_id }
     contactEmail   = { S = "sample-partner@example.com" }
@@ -1426,7 +1493,7 @@ resource "aws_dynamodb_table_item" "sample_user_sftp_entra_simple" {
 resource "aws_iam_role" "sample_session_1" {
   count    = var.dr_mode ? 0 : 1
   provider = aws.active
-  name     = "mft-sample-carrier.sample-partner.sample-transfer-1.np"
+  name     = "mft-sample-carrier.sample-partner.sample-transfer-1.t"
   # ... assume_role_policy: transfer.amazonaws.com ...
 }
 # sample_session_2 and sample_session_3 follow the same pattern for
@@ -1641,22 +1708,16 @@ output "entra_config_secret_arn" {
 
 ---
 
-## Cross-Stack Reference Convention
+## Partner Onboarding Requirements
 
-The carrier and partner onboarding Terraform modules consume the following SSM parameters published by this module. Because SSM Parameter Store is regional and the onboarding Terraform must work against whichever region is currently active (primary or DR), these parameters are provisioned in both primary and DR mode. Each region's parameters reflect that region's values — `transfer_server_id` differs between primary and DR since they are separate servers.
+Carrier and partner onboarding is handled by separate Terraform modules (Phase 2). Those modules must provision:
 
-| Value | SSM Path |
-|---|---|
-| `transfer_server_id` | `/<prefix>/mft/server-id` |
-| `s3_source_bucket` | `/<prefix>/mft/bucket-name` |
-
-The default KMS key ARN is intentionally excluded — carrier onboarding provisions its own carrier-specific KMS key and partner onboarding references the carrier key directly. The default key is only relevant for objects written before any carrier is onboarded and is not needed by onboarding automation.
-
-The partner onboarding Terraform must also provision:
 - For FTPS: an Entra ID app registration (client ID and secret), an app role on the Lambda app registration with value matching the IAM role name, assigned to the partner service principal via Graph API
 - For SFTP: the partner's SSH public key stored in the DynamoDB users table record
-- An IAM session role named `mft-<carrierId>.<partnerId>.<transferTypeId>.<env>` with S3 permissions scoped to both `<bucket>/production/<carrierId>/<partnerId>/<transferTypeId>/*` and `<bucket>/non-production/<carrierId>/<partnerId>/<transferTypeId>/*` and KMS decrypt/generate on the bucket default key
-- DynamoDB records in carriers, partners, transfer-types, and users tables as appropriate
+- An IAM session role named `mft-<carrierId>.<partnerId>.<transferTypeId>.<env>` with S3 permissions scoped to both `<bucket>/production/<carrierId>/<partnerId>/<transferTypeId>/<frequencyId>/*` and `<bucket>/test/<carrierId>/<partnerId>/<transferTypeId>/<frequencyId>/*` and KMS decrypt/generate on the bucket default key
+- DynamoDB records in carriers, partners, transfer-types, frequencies, and users tables as appropriate
+
+This stack does not publish SSM parameters for cross-stack lookup. Onboarding modules should take required values as inputs (or read Terraform outputs) as needed.
 
 ---
 
@@ -1688,7 +1749,7 @@ On DR failback: destroy DR state → re-apply primary state. Primary state detec
 
 1. **`_init.tf` is the only file for provider blocks** — do not place `terraform {}` or `provider` blocks anywhere else.
 
-2. **Locals consolidation** — the main locals block goes in `terraform/locals.tf`. KMS ARN locals may be in a second `locals {}` block in the same file to resolve forward references. No locals blocks in any other file.
+2. **Locals consolidation** — all `locals {}` blocks live in `terraform/locals.tf` (including frequency domain seeds and sample timestamps). Do not declare `locals` in other Terraform files.
 
 3. **VPC data source requires no filter** — one VPC per account/region. Do not add any filter, tag, or `default` attribute. Public subnets are tagged `Type = public` and used for Transfer Family, EIPs, and the S3 gateway endpoint. Private subnets are tagged `Type = private` and used for the Lambda and Secrets Manager VPC endpoint.
 
@@ -1696,7 +1757,7 @@ On DR failback: destroy DR state → re-apply primary state. Primary state detec
 
 5. **`address_allocation_ids` and `subnet_ids` alignment** — both must reference `local.public_subnet_ids`. Do not reference `data.aws_subnets.private.ids` directly anywhere.
 
-6. **CRR `depends_on`** — `aws_s3_bucket_replication_configuration` must declare `depends_on` on both versioning resources.
+6. **CRR `depends_on`** — `aws_s3_bucket_replication_configuration` must declare `depends_on` on both versioning resources. Versioning is required for CRR. Do **not** add lifecycle rules on the MFT buckets — archiving is an external add-on.
 
 7. **ACM cert ARN** — always reference `aws_acm_certificate_validation.mft.certificate_arn`, never `aws_acm_certificate.mft.arn`.
 
@@ -1708,10 +1769,8 @@ On DR failback: destroy DR state → re-apply primary state. Primary state detec
 
 11. **Entra config secret is external** — referenced only via `data "aws_secretsmanager_secret" "entra_config"`. This stack does not create or manage the secret value. The Lambda reads it at runtime via `secretsmanager:GetSecretValue`; the secret name is derived from `var.prefix` and exposed as `local.entra_config_secret`. The secret value must be a JSON object with keys `entra_tenant_id`, `entra_client_id`, `entra_client_secret`.
 
-12. **SSM parameters for cross-stack** — publish `transfer_server_id` and `s3_source_bucket` using path convention `/<prefix>/mft/<key>`. Provision in both primary and DR mode using the `aws.active` provider so each region's state writes its own values. Do not publish `kms_default_key_arn` — it is not needed by carrier or partner onboarding automation.
+12. **`commit_hash`, `git_repository`, and `allowed_cidr_blocks`** — injected automatically by Terraflow from environment variables (`GIT_COMMIT_SHA`, `GITHUB_REPOSITORY`, `ALLOWED_CIDR_BLOCKS`). Applied exclusively via `common_tags` for the first two. Not used in any resource name or identifier. Do not add these to command line `-var` arguments.
 
-13. **`commit_hash`, `git_repository`, and `allowed_cidr_blocks`** — injected automatically by Terraflow from environment variables (`GIT_COMMIT_SHA`, `GITHUB_REPOSITORY`, `ALLOWED_CIDR_BLOCKS`). Applied exclusively via `common_tags` for the first two. Not used in any resource name or identifier. Do not add these to command line `-var` arguments.
+13. **DynamoDB global tables** — provisioned with `count = var.dr_mode ? 0 : 1`. Each table includes a `replica { region_name = var.dr_region }` block for global table replication. The DynamoDB gateway endpoint is associated with private subnet route tables only — use `data.aws_route_tables.private` not the public route tables.
 
-14. **DynamoDB global tables** — provisioned with `count = var.dr_mode ? 0 : 1`. Each table includes a `replica { region_name = var.dr_region }` block for global table replication. The DynamoDB gateway endpoint is associated with private subnet route tables only — use `data.aws_route_tables.private` not the public route tables.
-
-15. **No `aws_transfer_user` resources** — with `AWS_LAMBDA` identity provider, Transfer Family has no native user objects. All user concerns are handled dynamically by the Lambda response. Do not create any `aws_transfer_user` or `aws_transfer_ssh_key` resources.
+14. **No `aws_transfer_user` resources** — with `AWS_LAMBDA` identity provider, Transfer Family has no native user objects. All user concerns are handled dynamically by the Lambda response. Do not create any `aws_transfer_user` or `aws_transfer_ssh_key` resources.

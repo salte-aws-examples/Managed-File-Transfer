@@ -39,4 +39,18 @@ locals {
   entra_config_secret = "${var.prefix}/mft/entra"
 
   vpc_id = data.aws_vpc.this.id
+
+  # Shared seed timestamp for domain/sample DynamoDB items.
+  sample_timestamp         = "2024-01-01T00:00:00Z"
+  frequency_seed_timestamp = "2024-01-01T00:00:00Z"
+
+  # Canonical frequency domain values — retained when sample.tf is removed in Phase 2.
+  frequencies = {
+    daily         = "Daily"
+    weekly        = "Weekly"
+    monthly       = "Monthly"
+    quarterly     = "Quarterly"
+    "semi-annual" = "Semi-annual"
+    annual        = "Annual"
+  }
 }

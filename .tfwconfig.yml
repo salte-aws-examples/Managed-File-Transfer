@@ -18,4 +18,5 @@ variables:
   sample_ftps_entra_client_id: "${SAMPLE_FTPS_ENTRA_CLIENT_ID}"
   sample_sftp_entra_client_id: "${SAMPLE_SFTP_ENTRA_CLIENT_ID}"
   sample_sftp_ssh_public_key: "${SAMPLE_SFTP_SSH_PUBLIC_KEY}"
+  auth_verbose_logging: "${AUTH_VERBOSE_LOGGING}"
   dr_mode: "${DR_MODE}"

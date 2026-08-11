@@ -1,11 +1,7 @@
-import {
-  DynamoDBClient,
-  GetItemCommand,
-} from "@aws-sdk/client-dynamodb";
-import {
-  GetSecretValueCommand,
-  SecretsManagerClient,
-} from "@aws-sdk/client-secrets-manager";
+import { AttributeValue, DynamoDBClient, GetItemCommand } from '@aws-sdk/client-dynamodb';
+import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
+import { logError, logVerbose } from './logger';
+import { allowsAllSourceIps, resolveAllowedSourceCidrs, sourceIpMatchesCidrs } from './sourceIp';
 
 const secrets = new SecretsManagerClient({});
 const dynamo = new DynamoDBClient({});
@@ -14,6 +10,9 @@ type TransferAuthEvent = {
   username?: string;
   password?: string;
   publicKey?: string;
+  protocol?: string;
+  serverId?: string;
+  sourceIp?: string;
 };
 
 type LambdaContext = {
@@ -21,13 +20,49 @@ type LambdaContext = {
 };
 
 type TransferAuthResponse =
-  | {}
+  | Record<string, never>
   | {
       Role: string;
-      HomeDirectoryType: "LOGICAL";
+      HomeDirectoryType: 'LOGICAL';
       HomeDirectoryDetails: string;
       PublicKeys?: string[];
     };
+
+function validateSourceIp(
+  username: string,
+  sourceIp: string | undefined,
+  userItem: Record<string, AttributeValue>,
+  partnerItem: Record<string, AttributeValue> | undefined
+): boolean {
+  const userOverridePresent = userItem.allowedSourceCidrs !== undefined;
+  const allowedCidrs = resolveAllowedSourceCidrs(
+    userItem.allowedSourceCidrs?.S,
+    partnerItem?.allowedSourceCidrs?.S,
+    userOverridePresent
+  );
+
+  if (!allowedCidrs) {
+    return true;
+  }
+
+  if (allowsAllSourceIps(allowedCidrs)) {
+    logVerbose('Source IP unrestricted (0.0.0.0/0)', { username, sourceIp });
+    return true;
+  }
+
+  if (!sourceIp) {
+    logError(`Missing sourceIp for ${username}`);
+    return false;
+  }
+
+  if (!sourceIpMatchesCidrs(sourceIp, allowedCidrs)) {
+    logError(`Source IP denied for ${username}: ${sourceIp}`);
+    return false;
+  }
+
+  logVerbose('Source IP allowed', { username, sourceIp });
+  return true;
+}
 
 async function authenticateWithEntra(
   username: string,
@@ -36,20 +71,18 @@ async function authenticateWithEntra(
   carrierId: string,
   partnerId: string,
   transferId: string,
-  env: string,
+  env: string
 ): Promise<boolean> {
   const secretResponse = await secrets.send(
-    new GetSecretValueCommand({ SecretId: process.env.ENTRA_CONFIG_SECRET }),
+    new GetSecretValueCommand({ SecretId: process.env.ENTRA_CONFIG_SECRET })
   );
-  const { entra_tenant_id, entra_client_id } = JSON.parse(
-    secretResponse.SecretString ?? "{}",
-  ) as {
+  const { entra_tenant_id, entra_client_id } = JSON.parse(secretResponse.SecretString ?? '{}') as {
     entra_tenant_id?: string;
     entra_client_id?: string;
   };
 
   if (!entra_tenant_id || !entra_client_id) {
-    console.error("Missing entra_tenant_id or entra_client_id in secret");
+    logError('Missing entra_tenant_id or entra_client_id in secret');
     return false;
   }
 
@@ -57,47 +90,42 @@ async function authenticateWithEntra(
   const tokenUrl = `https://login.microsoftonline.com/${entra_tenant_id}/oauth2/v2.0/token`;
 
   const body = new URLSearchParams({
-    grant_type: "client_credentials",
+    grant_type: 'client_credentials',
     client_id: clientId,
     client_secret: password,
     scope,
   });
 
   const tokenResponse = await fetch(tokenUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: body.toString(),
   });
 
   if (!tokenResponse.ok) {
-    console.error(
-      `Entra ID auth failed for ${username}: ${tokenResponse.status}`,
-    );
+    logError(`Entra ID auth failed for ${username}: ${tokenResponse.status}`);
     return false;
   }
 
   const tokenData = (await tokenResponse.json()) as { access_token: string };
-  const [, payloadB64] = tokenData.access_token.split(".");
-  const jwtPayload = JSON.parse(
-    Buffer.from(payloadB64, "base64url").toString(),
-  ) as { aud?: string; roles?: string[] };
+  const [, payloadB64] = tokenData.access_token.split('.');
+  const jwtPayload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString()) as {
+    aud?: string;
+    roles?: string[];
+  };
 
   if (jwtPayload.aud !== `api://${entra_client_id}`) {
-    console.error(`Invalid token audience: ${jwtPayload.aud}`);
+    logError(`Invalid token audience: ${jwtPayload.aud}`);
     return false;
   }
 
-  // Validate roles claim matches DynamoDB record exactly.
-  // Format: mft-<carrierId>.<partnerId>.<transferTypeId>.<env>
-  // Neither Entra nor DynamoDB alone is sufficient — both must agree.
   const roleName = jwtPayload.roles?.[0];
   if (!roleName) {
-    console.error(`No roles claim in token for ${username}`);
+    logError(`No roles claim in token for ${username}`);
     return false;
   }
-  const roleWithoutPrefix = roleName.replace(/^mft-/, "");
-  const [roleCarrier, rolePartner, roleTransfer, roleEnv] =
-    roleWithoutPrefix.split(".");
+  const roleWithoutPrefix = roleName.replace(/^mft-/, '');
+  const [roleCarrier, rolePartner, roleTransfer, roleEnv] = roleWithoutPrefix.split('.');
 
   if (
     roleCarrier !== carrierId ||
@@ -105,7 +133,7 @@ async function authenticateWithEntra(
     roleTransfer !== transferId ||
     roleEnv !== env
   ) {
-    console.error(`Role claim mismatch for ${username}: token=${roleName}`);
+    logError(`Role claim mismatch for ${username}: token=${roleName}`);
     return false;
   }
 
@@ -114,66 +142,100 @@ async function authenticateWithEntra(
 
 export const handler = async (
   event: TransferAuthEvent,
-  context: LambdaContext,
+  context: LambdaContext
 ): Promise<TransferAuthResponse> => {
-  const { username, password } = event ?? {};
+  const { username, password, protocol, serverId, sourceIp } = event ?? {};
+
+  logVerbose('Auth request received', {
+    username,
+    protocol,
+    serverId,
+    sourceIp,
+    hasPassword: Boolean(password),
+  });
 
   try {
     if (!username) {
-      console.error("Missing username");
+      logError('Missing username');
       return {};
     }
 
-    // 1. Look up username in DynamoDB users table.
     const tableResult = await dynamo.send(
       new GetItemCommand({
         TableName: process.env.USERS_TABLE,
         Key: { username: { S: username } },
-      }),
+      })
     );
 
     const item = tableResult.Item;
     if (!item) {
-      console.error(`Unknown username: ${username}`);
+      logError(`Unknown username: ${username}`);
       return {};
     }
-    if (item.status.S !== "active") {
-      console.error(`Disabled username: ${username}`);
+    if (item.status.S !== 'active') {
+      logError(`Disabled username: ${username}`);
       return {};
     }
 
-    const protocol = item.protocol.S!;
+    const userProtocol = item.protocol.S!;
     const carrierId = item.carrierId.S!;
     const partnerId = item.partnerId.S!;
     const transferId = item.transferTypeId.S!;
+    const frequencyId = item.frequencyId?.S;
     const env = item.env.S!;
     const storedKey = item.publicKey?.S;
 
-    const accountId = context.invokedFunctionArn.split(":")[4];
-    const bucket = process.env.S3_BUCKET_NAME;
-
-    if (!bucket) {
-      console.error("Missing S3_BUCKET_NAME");
+    if (!frequencyId) {
+      logError(`Missing frequencyId for ${username}`);
       return {};
     }
 
-    const s3Folder = env === "p" ? "production" : "non-production";
-    const roleArn = `arn:aws:iam::${accountId}:role/mft-${carrierId}.${partnerId}.${transferId}.${env}`;
-    const homeDirectory = `/${bucket}/${s3Folder}/${carrierId}/${partnerId}/${transferId}`;
+    const partnerResult = await dynamo.send(
+      new GetItemCommand({
+        TableName: process.env.PARTNERS_TABLE,
+        Key: { partnerId: { S: partnerId } },
+      })
+    );
 
-    // 2. Branch on protocol and credential type:
-    //    ftps              → Entra ID (password required)
-    //    sftp + publicKey  → return PublicKeys from DynamoDB; Transfer Family validates the key
-    //    sftp + no key     → Entra ID (password required)
-    if (protocol === "ftps" || (protocol === "sftp" && !storedKey)) {
+    if (!validateSourceIp(username, sourceIp, item, partnerResult.Item)) {
+      return {};
+    }
+
+    const accountId = context.invokedFunctionArn.split(':')[4];
+    const bucket = process.env.S3_BUCKET_NAME;
+
+    if (!bucket) {
+      logError('Missing S3_BUCKET_NAME');
+      return {};
+    }
+
+    const envFolders: Record<string, string> = {
+      p: 'production',
+      t: 'test',
+    };
+    const s3Folder = envFolders[env];
+    if (!s3Folder) {
+      logError(`Unsupported env for ${username}: ${env}`);
+      return {};
+    }
+
+    const roleArn = `arn:aws:iam::${accountId}:role/mft-${carrierId}.${partnerId}.${transferId}.${env}`;
+    const homeDirectory = `/${bucket}/${s3Folder}/${carrierId}/${partnerId}/${transferId}/${frequencyId}`;
+
+    if (protocol && protocol.toLowerCase() !== userProtocol.toLowerCase()) {
+      logError(`Protocol mismatch for ${username}: event=${protocol} record=${userProtocol}`);
+      return {};
+    }
+
+    if (userProtocol === 'ftps' || (userProtocol === 'sftp' && !storedKey)) {
       if (!password) {
-        console.error(`Missing password for ${username}`);
+        logError(`Missing password for ${username}`);
         return {};
       }
 
       const clientId = item.clientId?.S;
       if (!clientId) {
-        console.error(`No Entra client ID stored for ${username}`);
+        logError(`No Entra client ID stored for ${username}`);
         return {};
       }
 
@@ -184,33 +246,35 @@ export const handler = async (
         carrierId,
         partnerId,
         transferId,
-        env,
+        env
       );
       if (!authenticated) {
         return {};
       }
 
-      console.log(`${protocol.toUpperCase()} Entra authenticated: ${username}`);
-    } else if (protocol !== "sftp") {
-      console.error(`Unsupported protocol: ${protocol}`);
+      logVerbose(`${userProtocol.toUpperCase()} Entra authenticated`, {
+        username,
+      });
+    } else if (userProtocol !== 'sftp') {
+      logError(`Unsupported protocol: ${userProtocol}`);
       return {};
     }
 
     const response: TransferAuthResponse = {
       Role: roleArn,
-      HomeDirectoryType: "LOGICAL",
-      HomeDirectoryDetails: JSON.stringify([
-        { Entry: "/", Target: homeDirectory },
-      ]),
+      HomeDirectoryType: 'LOGICAL',
+      HomeDirectoryDetails: JSON.stringify([{ Entry: '/', Target: homeDirectory }]),
     };
 
     if (storedKey) {
+      logVerbose('SFTP public key session issued', { username });
       return { ...response, PublicKeys: [storedKey] };
     }
 
+    logVerbose('Session issued', { username, protocol: userProtocol });
     return response;
   } catch (err) {
-    console.error("Auth Lambda error:", err);
+    logError(`Auth Lambda error: ${String(err)}`);
     return {};
   }
 };

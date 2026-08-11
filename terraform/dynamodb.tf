@@ -79,6 +79,43 @@ resource "aws_dynamodb_table" "transfer_types" {
   tags = merge(local.common_tags, { Name = "${var.prefix}-mft-transfer-types" })
 }
 
+resource "aws_dynamodb_table" "frequencies" {
+  count        = var.dr_mode ? 0 : 1
+  provider     = aws.active
+  name         = "${var.prefix}-mft-frequencies"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "frequencyId"
+
+  attribute {
+    name = "frequencyId"
+    type = "S"
+  }
+
+  stream_enabled   = true
+  stream_view_type = "NEW_AND_OLD_IMAGES"
+
+  replica {
+    region_name = var.dr_region
+  }
+
+  tags = merge(local.common_tags, { Name = "${var.prefix}-mft-frequencies" })
+}
+
+resource "aws_dynamodb_table_item" "frequencies" {
+  for_each   = var.dr_mode ? {} : local.frequencies
+  provider   = aws.active
+  table_name = aws_dynamodb_table.frequencies[0].name
+  hash_key   = "frequencyId"
+
+  item = jsonencode({
+    frequencyId = { S = each.key }
+    name        = { S = each.value }
+    status      = { S = "active" }
+    createdAt   = { S = local.frequency_seed_timestamp }
+    updatedAt   = { S = local.frequency_seed_timestamp }
+  })
+}
+
 resource "aws_dynamodb_table" "users" {
   count        = var.dr_mode ? 0 : 1
   provider     = aws.active
