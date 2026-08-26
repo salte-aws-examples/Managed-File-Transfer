@@ -99,14 +99,16 @@ On every SFTP/FTPS connect, Transfer Family invokes the auth Lambda with `{ user
 
 1. **Looks up** `username` in DynamoDB (`USERS_TABLE`). Deny (`{}`) if not found.
 2. **Checks status** — deny if `status !== "active"`.
-3. **Looks up partner** — fetch the `partners` record by `partnerId` from the user record.
-4. **Validates source IP** (before any Entra or credential check):
+3. **Requires `frequencyId`** — deny if the user record has no `frequencyId`.
+4. **Looks up partner** — fetch the `partners` record by `partnerId`. Used only for CIDR fallback; a missing partner does not deny by itself.
+5. **Validates source IP** (before any Entra or credential check):
    - Resolve allowed CIDRs: use the user record's `allowedSourceCidrs` when present and non-empty; otherwise use the partner record's `allowedSourceCidrs`.
    - If neither record defines CIDRs, no IP restriction is applied.
    - If the allowlist includes `0.0.0.0/0`, any source IP is permitted.
    - Otherwise `sourceIp` from the event must match at least one CIDR; deny if missing or no match.
-5. **Derives session** — `roleArn` and `homeDirectory` from DynamoDB record fields (`carrierId`, `partnerId`, `transferTypeId`, `frequencyId`, `env`). Deny if `frequencyId` is missing or `env` is not `p`/`t`.
-6. **Routes by protocol and stored credentials:**
+6. **Derives session** — `roleArn` and `homeDirectory` from DynamoDB record fields (`carrierId`, `partnerId`, `transferTypeId`, `frequencyId`, `env`). Deny if `env` is not `p`/`t`.
+7. **Checks protocol** — deny if the event `protocol` is present and does not match the DynamoDB record.
+8. **Routes by protocol and stored credentials:**
 
 | Protocol | `publicKey` in DynamoDB | Lambda behavior |
 |---|---|---|
@@ -114,15 +116,11 @@ On every SFTP/FTPS connect, Transfer Family invokes the auth Lambda with `{ user
 | `sftp` | yes | No password required; returns session + `PublicKeys: [storedKey]`; Transfer Family validates the client key |
 | `sftp` | no | Requires `password`; validates via Entra ID + JWT `roles` claim |
 
-7. **Entra paths** — fetch Lambda app config from Secrets Manager (`ENTRA_CONFIG_SECRET`), request a token using the **partner's** `clientId` from the DynamoDB record (not the username), validate JWT audience, then validate the JWT `roles[0]` claim matches the DynamoDB record exactly:
-
-   ```
-   mft-<carrierId>.<partnerId>.<transferTypeId>.<env>
-   ```
+9. **Entra paths** — fetch Lambda app config from Secrets Manager (`ENTRA_CONFIG_SECRET`), request a token using the **user record's** `clientId` (not the username and not `entra_client_id` from the secret), validate JWT audience against `api://${entra_client_id}`, then compare `roles[0]` to the DynamoDB record. The claim may include an `mft-` prefix; after that prefix is stripped, `carrier.partner.transferType.env` must match the record.
 
    Neither Entra nor DynamoDB alone is sufficient — both must agree.
 
-8. **On success** — return a Transfer Family authorization response:
+10. **On success** — return a Transfer Family authorization response:
 
    ```json
    {
@@ -133,7 +131,7 @@ On every SFTP/FTPS connect, Transfer Family invokes the auth Lambda with `{ user
    }
    ```
 
-   `PublicKeys` is included only for SFTP users with a stored public key in DynamoDB. `production` maps to `env = p` and `test` maps to `env = t`.
+   `PublicKeys` is included when the user record has a `publicKey`. `production` maps to `env = p` and `test` maps to `env = t`.
 
 ### Source IP allowlists
 
@@ -231,7 +229,7 @@ Global tables require DynamoDB streams (`NEW_AND_OLD_IMAGES`) for cross-region r
 | Build output | `.build/lambda/auth/index.js` |
 | Deploy zip | `.build/lambda/auth.zip` |
 
-Prefer `npm run tf:plan` / `npm run tf:apply`, which run `build:lambda` (esbuild) before Terraflow. You can also run `npm run build:lambda` alone. The legacy path `lambda/auth/index.mjs` was removed when auth migrated to TypeScript.
+Prefer `npm run tf:plan` / `npm run tf:apply`, which run `build:lambda` (esbuild → Node 20 CJS bundle) before Terraflow. You can also run `npm run build:lambda` alone. `npm run build` is `tsc` into `dist/` for typecheck/tests; Terraform does not deploy `dist/`. The legacy path `lambda/auth/index.mjs` was removed when auth migrated to TypeScript.
 
 ## Bucket Folder Structure
 
@@ -258,31 +256,32 @@ The `production/` and `test/` split lives inside a single bucket; environment is
 ## Prerequisites
 
 - **Terraflow** installed globally — `npm install -g @salte-common/terraflow`.
-- **Node.js 18+** and `npm install` in this repo (for Lambda build and tests).
+- **Node.js 18+** locally (`package.json` `engines`) and `npm install` in this repo (for Lambda build and tests). The deployed auth Lambda runtime is **Node.js 20**.
 - **VPC with tagged subnets** in *both* the primary and DR regions. Public subnets tagged `Type = public` (Transfer Family, EIPs, S3 gateway endpoint). Private subnets tagged `Type = private` (Lambda, Secrets Manager interface endpoint, DynamoDB gateway endpoint route tables). One VPC per account/region is assumed; the module discovers it via a data source — no `vpc_id` input is required.
+- **NAT (or equivalent outbound HTTPS)** in that VPC so the auth Lambda can reach Entra ID. This module does not provision a NAT gateway.
 - **Public Route 53 hosted zone** pre-provisioned in the target account and referenced by name via `var.public_hosted_zone_name`. The ACM certificate is DNS-validated against this zone.
-- **Entra config secret** named `<prefix>/mft/entra` in Secrets Manager (JSON with `entra_tenant_id`, `entra_client_id`, `entra_client_secret`). Provisioned outside this stack.
-- **State buckets** named `${AWS_REGION}-${AWS_ACCOUNT_ID}-terraform-state` pre-provisioned in both regions, with a `terraform-statelock` DynamoDB table.
-- **`TerraformExecutionRole`** IAM role in the target account, assumable from the caller. Terraflow assumes this role via the `auth.assume_role` block in `.tfwconfig.yml`.
+- **Entra config secret** named `<prefix>/mft/entra` in Secrets Manager. The Lambda reads `entra_tenant_id` and `entra_client_id` (token URL, audience, and scope). Partner app IDs live in DynamoDB `users.clientId`; the Transfer Family password is that partner app's client secret. Provisioned outside this stack.
+- **State buckets** named `${AWS_REGION}-${AWS_ACCOUNT_ID}-terraform-state` pre-provisioned in both regions, with a `terraform-statelock` DynamoDB table. Caller credentials must already be able to use that backend; `.tfwconfig.yml` has no `auth.assume_role` / `TerraformExecutionRole` block.
 
 ## Variables
 
-Defined in `terraform/inputs.tf`. Terraflow injects several values from environment variables via `.tfwconfig.yml` — see `.env.template` for the full list.
+Defined in `terraform/inputs.tf`. Terraflow injects several values from environment variables via `.tfwconfig.yml`. Copy `.env.template` to `.env` for those Terraform variables. The S3 backend also needs `AWS_REGION`, `AWS_ACCOUNT_ID`, and `GIT_REPOSITORY` (state object key). Tagging uses `GITHUB_REPOSITORY` (`git_repository`) and `GIT_COMMIT_SHA` (`commit_hash`).
 
 | Variable | Description | Default |
 |---|---|---|
 | `prefix` | Short identifier used to namespace all resource names, aliases, and tags. | `"salte"` |
 | `primary_region` | Primary AWS region for the MFT solution. | `"us-east-1"` |
 | `dr_region` | Disaster recovery AWS region. | `"us-west-2"` |
-| `dr_mode` | When `true`, provisions DR region infrastructure and reverses replication/DNS. | `false` |
-| `eip_count` | Number of EIPs/AZs for the Transfer Family endpoint. Set to `1` in sandbox accounts. | `2` |
+| `dr_mode` | When `true`, provisions DR region infrastructure and reverses replication/DNS. Injected from `DR_MODE`. | `false` |
+| `eip_count` | Number of EIPs/AZs for the Transfer Family endpoint. Must not exceed the number of public **and** private subnets in the active region. Set to `1` in sandbox accounts. | `2` |
 | `public_hosted_zone_name` | Public Route 53 hosted zone name (e.g. `your-domain.com`). | **Required** (via env) |
-| `allowed_cidr_blocks` | CIDR blocks permitted inbound on ports 22, 21, 1024-65535, and 443. | **Required** (via env) |
+| `allowed_cidr_blocks` | CIDR blocks permitted inbound on ports 22, 21, 1024-65535, and 443. No Terraform default — `.env.template` uses `0.0.0.0/0` for sandbox only. | **Required** (via env) |
 | `git_repository` | Git repository name for tagging. | Injected by Terraflow |
 | `commit_hash` | Deployment commit hash for tagging. | Injected by Terraflow |
 | `sample_ftps_entra_client_id` | Entra client ID for sample FTPS user (`sample-ftps-test`). Seeds DynamoDB. | `""` |
 | `sample_sftp_entra_client_id` | Entra client ID for sample SFTP+Entra user (`sample-sftp-entra-test`). Seeds DynamoDB. | `""` |
 | `sample_sftp_ssh_public_key` | SSH public key for sample SFTP+SSH user (`sample-sftp-test`). Seeds DynamoDB. | `""` |
+| `auth_verbose_logging` | When `true`, sets `VERBOSE_LOGGING=true` on the auth Lambda. Injected from `AUTH_VERBOSE_LOGGING`. | `false` |
 
 ## Usage
 
@@ -370,16 +369,16 @@ npm run tf:apply -- -var="dr_mode=false"
 Two state files, one per region, owned by the wrapper-driven `${AWS_REGION}-${AWS_ACCOUNT_ID}-terraform-state` backend bucket:
 
 - **Primary state** (`us-east-1` bucket, `dr_mode = false`) — **owns** the primary S3 bucket, DR S3 bucket, KMS default key, DynamoDB global tables, primary Transfer Family server, EIPs, security group, VPC endpoints, primary-direction CRR, public-zone validation records, private hosted zone, and Route 53 records (public `A` → EIPs, private `CNAME` → Transfer endpoint).
-- **DR state** (`us-west-2` bucket, `dr_mode = true`) — **owns** the DR Transfer Family server, EIPs, security group, VPC endpoints, ACM cert, DR-direction CRR, private-zone VPC association, and Route 53 records overwriting primary's (public `A` → DR EIPs, private `CNAME` → DR Transfer endpoint). **References** both S3 buckets, DynamoDB tables, and the private hosted zone as `data` sources so `terraform destroy` in DR mode never deletes them.
+- **DR state** (`us-west-2` bucket, `dr_mode = true`) — **owns** the DR Transfer Family server, auth Lambda, EIPs, security groups, VPC endpoints, ACM cert, DR-direction CRR, private-zone VPC association, and Route 53 records overwriting primary's (public `A` → DR EIPs, private `CNAME` → DR Transfer endpoint). **References** both S3 buckets, KMS keys, and the private hosted zone as `data` sources so `terraform destroy` in DR mode never deletes them. DynamoDB global table replicas already exist in the DR region and are used by table name; they are not Terraform data sources.
 
-Sample-only resources (DynamoDB seed items and sample session IAM roles) live in `terraform/sample.tf` and are omitted when `dr_mode = true`.
+Sample-only resources (carrier/partner/transfer-type/user seed items and sample session IAM roles) live in `terraform/sample.tf` and are omitted when `dr_mode = true`. Canonical frequency rows are seeded from `terraform/dynamodb.tf` in primary mode.
 
 ## Security Notes
 
-- **Inbound exposure** — The Transfer Family security group permits inbound on ports **22 (SFTP)**, **21 + 1024-65535 (FTPS control + passive data)**, and **443 (AS2 over HTTPS)** from `var.allowed_cidr_blocks`. The default of `0.0.0.0/0` is sandbox-only; restrict to partner CIDRs in production. Per-partner and per-transfer `allowedSourceCidrs` in DynamoDB provide an additional auth-layer IP check inside the Lambda.
+- **Inbound exposure** — The Transfer Family security group permits inbound on ports **22 (SFTP)**, **21 + 1024-65535 (FTPS control + passive data)**, and **443 (AS2 over HTTPS)** from `var.allowed_cidr_blocks`. There is no Terraform default; `.env.template` uses `0.0.0.0/0` for sandbox only — restrict to partner CIDRs in production. Per-partner and per-transfer `allowedSourceCidrs` in DynamoDB provide an additional auth-layer IP check inside the Lambda.
 - **Authentication** — SFTP/FTPS sessions require a valid DynamoDB user record in `active` status, a matching source IP when CIDRs are configured, plus successful credential validation. Entra paths require both a valid token and a matching JWT `roles` claim. SFTP+SSH paths return `PublicKeys` from DynamoDB; Transfer Family performs cryptographic key verification. Entra client secrets are supplied at connect time and are not stored in AWS.
-- **S3 hardening** — All S3 buckets enforce `block_public_acls`, `block_public_policy`, `ignore_public_acls`, and `restrict_public_buckets`. Versioning is enabled and non-current versions expire after 90 days.
-- **Encryption** — All objects are encrypted with **SSE-KMS** using customer-managed multi-region CMKs. The default key (`alias/<prefix>-mft-default`) encrypts the primary bucket. **Key rotation is enabled** on every CMK.
+- **S3 hardening** — All S3 buckets enforce `block_public_acls`, `block_public_policy`, `ignore_public_acls`, and `restrict_public_buckets`. Versioning is enabled because CRR requires it. This stack does **not** attach lifecycle rules; archiving and expiry live on a separate archive bucket outside this repo.
+- **Encryption** — All objects are encrypted with **SSE-KMS** using a customer-managed multi-region CMK (`alias/<prefix>-mft-default`) and its replica. **Key rotation is enabled** on the primary key.
 - **IAM** — Least-privilege roles: `<prefix>-mft-logging` (Transfer Family → CloudWatch Logs), `<prefix>-mft-replication` (S3 CRR with KMS access on both keys), auth Lambda execution role (`dynamodb:GetItem`, Secrets Manager read, CloudWatch Logs), and per-partner session roles scoped to a single S3 prefix (including `frequencyId`).
 - **Logging** — Transfer Family writes session and protocol logs to CloudWatch Logs via the logging role. The auth Lambda logs to `/aws/lambda/<prefix>-mft-auth` with 90-day retention. Set `auth_verbose_logging` (Terraform) or `VERBOSE_LOGGING=true` (Lambda env) to log all auth requests; otherwise only errors are logged.
 - **AS2 authentication** — AS2 does **not** use the Transfer Family identity provider. Trading partner agreements, certificates, and connectors are configured per partner during onboarding, outside this module's scope.

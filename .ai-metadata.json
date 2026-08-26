@@ -7,11 +7,11 @@
       "last_updated": "2026-05-28T17:00:00Z",
       "tool": "cursor"
     },
-    ".env.example": {
-      "lines_total": 23,
-      "lines_ai_generated": 23,
-      "ai_percentage": 100,
-      "last_updated": "2026-05-25T12:31:36Z",
+    ".env.template": {
+      "lines_total": 16,
+      "lines_ai_generated": 16,
+      "ai_percentage": 100.0,
+      "last_updated": "2026-08-26T15:00:35Z",
       "tool": "cursor"
     },
     ".gitignore": {
@@ -29,10 +29,10 @@
       "tool": "cursor"
     },
     "README.md": {
-      "lines_total": 385,
-      "lines_ai_generated": 385,
+      "lines_total": 384,
+      "lines_ai_generated": 384,
       "ai_percentage": 100.0,
-      "last_updated": "2026-08-11T00:18:39Z",
+      "last_updated": "2026-08-26T15:00:35Z",
       "tool": "cursor"
     },
     ".cursor/rules/terraform.mdc": {
